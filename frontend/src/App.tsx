@@ -8,14 +8,6 @@ interface Message {
   timestamp: Date
 }
 
-// Declare SpeechRecognition types
-declare global {
-  interface Window {
-    SpeechRecognition: any
-    webkitSpeechRecognition: any
-  }
-}
-
 function App() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -27,7 +19,11 @@ function App() {
   ])
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
-  const recognitionRef = useRef<any>(null)
+  const [isConnected, setIsConnected] = useState(false)
+  
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
+  const audioElementRef = useRef<HTMLAudioElement | null>(null)
+  const dataChannelRef = useRef<RTCDataChannel | null>(null)
 
   const handleSendMessage = () => {
     if (inputText.trim()) {
@@ -50,75 +46,121 @@ function App() {
   }
 
   useEffect(() => {
-    // Initialize speech recognition
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    
-    if (SpeechRecognition) {
-      const recognition = new SpeechRecognition()
-      recognition.continuous = false
-      recognition.interimResults = false
-      recognition.lang = 'en-US'
-
-      recognition.onstart = () => {
-        console.log('Speech recognition started')
-      }
-
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript
-        console.log('Transcript:', transcript)
-        setInputText(transcript)
-        setIsRecording(false)
-      }
-
-      recognition.onerror = (event: any) => {
-        console.error('Speech recognition error:', event.error)
-        setIsRecording(false)
-        
-        if (event.error === 'not-allowed') {
-          alert('Microphone access was denied. Please allow microphone access in your browser settings.')
-        } else if (event.error === 'no-speech') {
-          alert('No speech was detected. Please try again.')
-        } else {
-          alert(`Speech recognition error: ${event.error}`)
-        }
-      }
-
-      recognition.onend = () => {
-        console.log('Speech recognition ended')
-        setIsRecording(false)
-      }
-
-      recognitionRef.current = recognition
-    }
-
     return () => {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop()
+      // Cleanup on unmount
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close()
+      }
+      if (audioElementRef.current) {
+        audioElementRef.current.srcObject = null
       }
     }
   }, [])
 
-  const toggleRecording = async () => {
-    if (!recognitionRef.current) {
-      alert('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.')
-      return
-    }
+  const startRealtimeSession = async () => {
+    try {
+      setIsRecording(true)
+      
+      // Create a peer connection
+      const pc = new RTCPeerConnection()
+      peerConnectionRef.current = pc
 
-    if (isRecording) {
-      // Stop recording
-      recognitionRef.current.stop()
-      setIsRecording(false)
-    } else {
-      // Start recording
-      try {
-        // Request microphone permission
-        await navigator.mediaDevices.getUserMedia({ audio: true })
-        recognitionRef.current.start()
-        setIsRecording(true)
-      } catch (error) {
-        console.error('Microphone access error:', error)
-        alert('Unable to access microphone. Please ensure microphone permissions are granted.')
+      // Set up to play remote audio from the model
+      audioElementRef.current = document.createElement('audio')
+      audioElementRef.current.autoplay = true
+      pc.ontrack = (e) => {
+        if (audioElementRef.current) {
+          audioElementRef.current.srcObject = e.streams[0]
+        }
       }
+
+      // Add local audio track for microphone input in the browser
+      const ms = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      })
+      pc.addTrack(ms.getTracks()[0])
+
+      // Set up data channel for sending and receiving events
+      const dc = pc.createDataChannel('oai-events')
+      dataChannelRef.current = dc
+
+      dc.onopen = () => {
+        console.log('Data channel opened')
+        setIsConnected(true)
+      }
+
+      dc.onmessage = (event) => {
+        console.log('Received message:', event.data)
+        // Handle events from the realtime API
+        try {
+          const message = JSON.parse(event.data)
+          console.log('Parsed message:', message)
+          // You can handle different message types here
+        } catch (err) {
+          console.error('Error parsing message:', err)
+        }
+      }
+
+      dc.onclose = () => {
+        console.log('Data channel closed')
+        setIsConnected(false)
+        setIsRecording(false)
+      }
+
+      // Start the session using the Session Description Protocol (SDP)
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+
+      const sdpResponse = await fetch('http://localhost:8000/session', {
+        method: 'POST',
+        body: offer.sdp,
+        headers: {
+          'Content-Type': 'application/sdp',
+        },
+      })
+
+      if (!sdpResponse.ok) {
+        throw new Error(`Failed to create session: ${sdpResponse.statusText}`)
+      }
+
+      const answerSdp = await sdpResponse.text()
+      const answer: RTCSessionDescriptionInit = {
+        type: 'answer',
+        sdp: answerSdp,
+      }
+      await pc.setRemoteDescription(answer)
+
+      console.log('Realtime session started successfully')
+    } catch (error) {
+      console.error('Error starting realtime session:', error)
+      alert(`Failed to start session: ${error instanceof Error ? error.message : 'Unknown error'}`)
+      setIsRecording(false)
+      setIsConnected(false)
+    }
+  }
+
+  const stopRealtimeSession = () => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close()
+      peerConnectionRef.current = null
+    }
+    if (audioElementRef.current) {
+      audioElementRef.current.srcObject = null
+    }
+    if (dataChannelRef.current) {
+      dataChannelRef.current.close()
+      dataChannelRef.current = null
+    }
+    setIsRecording(false)
+    setIsConnected(false)
+    console.log('Realtime session stopped')
+  }
+
+  const toggleRecording = async () => {
+    if (isRecording) {
+      stopRealtimeSession()
+    } else {
+      await startRealtimeSession()
     }
   }
 
