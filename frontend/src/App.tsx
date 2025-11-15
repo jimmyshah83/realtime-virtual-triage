@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
 interface Message {
@@ -6,6 +6,14 @@ interface Message {
   text: string
   sender: 'user' | 'bot'
   timestamp: Date
+}
+
+// Declare SpeechRecognition types
+declare global {
+  interface Window {
+    SpeechRecognition: any
+    webkitSpeechRecognition: any
+  }
 }
 
 function App() {
@@ -19,6 +27,7 @@ function App() {
   ])
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
+  const recognitionRef = useRef<any>(null)
 
   const handleSendMessage = () => {
     if (inputText.trim()) {
@@ -40,8 +49,77 @@ function App() {
     }
   }
 
-  const toggleRecording = () => {
-    setIsRecording(!isRecording)
+  useEffect(() => {
+    // Initialize speech recognition
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    
+    if (SpeechRecognition) {
+      const recognition = new SpeechRecognition()
+      recognition.continuous = false
+      recognition.interimResults = false
+      recognition.lang = 'en-US'
+
+      recognition.onstart = () => {
+        console.log('Speech recognition started')
+      }
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript
+        console.log('Transcript:', transcript)
+        setInputText(transcript)
+        setIsRecording(false)
+      }
+
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error)
+        setIsRecording(false)
+        
+        if (event.error === 'not-allowed') {
+          alert('Microphone access was denied. Please allow microphone access in your browser settings.')
+        } else if (event.error === 'no-speech') {
+          alert('No speech was detected. Please try again.')
+        } else {
+          alert(`Speech recognition error: ${event.error}`)
+        }
+      }
+
+      recognition.onend = () => {
+        console.log('Speech recognition ended')
+        setIsRecording(false)
+      }
+
+      recognitionRef.current = recognition
+    }
+
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+      }
+    }
+  }, [])
+
+  const toggleRecording = async () => {
+    if (!recognitionRef.current) {
+      alert('Speech recognition is not supported in your browser. Please use Chrome, Edge, or Safari.')
+      return
+    }
+
+    if (isRecording) {
+      // Stop recording
+      recognitionRef.current.stop()
+      setIsRecording(false)
+    } else {
+      // Start recording
+      try {
+        // Request microphone permission
+        await navigator.mediaDevices.getUserMedia({ audio: true })
+        recognitionRef.current.start()
+        setIsRecording(true)
+      } catch (error) {
+        console.error('Microphone access error:', error)
+        alert('Unable to access microphone. Please ensure microphone permissions are granted.')
+      }
+    }
   }
 
   return (
