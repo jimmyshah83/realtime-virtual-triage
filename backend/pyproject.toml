@@ -16,6 +16,10 @@ dependencies = [
     "python-multipart",
     "httpx",
     "python-dotenv",
+    "langgraph",
+    "langchain-openai",
+    "langchain-core",
+    "langchain",
 ]
 
 [project.optional-dependencies]
