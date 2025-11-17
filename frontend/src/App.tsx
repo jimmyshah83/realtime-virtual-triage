@@ -36,21 +36,26 @@ function App() {
 
   const handleSendMessage = async () => {
     if (inputText.trim()) {
-      const newMessage: Message = {
-        id: messages.length + 1,
-        text: inputText,
-        sender: 'user',
-        timestamp: new Date()
-      }
-      setMessages(prev => [...prev, newMessage])
-      if (sessionId) {
-        await prcocessWithAgents(inputText)
-      }
+      setMessages(prev => {
+        const newMessage: Message = {
+          id: prev.length + 1,
+          text: inputText,
+          sender: 'user',
+          timestamp: new Date()
+        }
+        return [...prev, newMessage]
+      })
+      
+      const messageText = inputText
       setInputText('')
+      
+      if (sessionId) {
+        await processWithAgents(messageText)
+      }
     }
   }
 
-  const prcocessWithAgents = async (userInput: string) => {
+  const processWithAgents = async (userInput: string) => {
     try {
       const sessionResponse = await fetch(`http://localhost:8000/chat/${sessionId}`, {
         method: 'POST',
@@ -68,14 +73,16 @@ function App() {
 
       setCurrentAgent(responseData.current_agent)
 
-      const agentMessage: Message = {
-        id: messages.length + 2,
-        text: responseData.response,
-        sender: 'bot',
-        timestamp: new Date(),
-        agent: responseData.current_agent
-      }
-      setMessages(prev => [...prev, agentMessage])
+      setMessages(prev => {
+        const agentMessage: Message = {
+          id: prev.length + 1,
+          text: responseData.response,
+          sender: 'bot',
+          timestamp: new Date(),
+          agent: responseData.current_agent
+        }
+        return [...prev, agentMessage]
+      })
 
       if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
         const responseEvent: RealtimeEvent = {
@@ -140,9 +147,9 @@ function App() {
 
       const sessionData = await sessionResponse.json()
       const ephemeralKey = sessionData.client_secret?.value
-      const newSessioonId = sessionData.id
+      const newSessionId = sessionData.id
 
-      setSessionId(newSessioonId)
+      setSessionId(newSessionId)
       
       // Create a peer connection
       const pc = new RTCPeerConnection()
@@ -202,15 +209,17 @@ function App() {
               const transcript = realtimeEvent.transcript
               console.log('Transcription completed:', transcript)
 
-              const userMessage: Message = {
-                id: messages.length + 1,
-                text: transcript,
-                sender: 'user',
-                timestamp: new Date()
-              }
-              setMessages(prev => [...prev, userMessage])
+              setMessages(prev => {
+                const userMessage: Message = {
+                  id: prev.length + 1,
+                  text: transcript,
+                  sender: 'user',
+                  timestamp: new Date()
+                }
+                return [...prev, userMessage]
+              })
 
-              await prcocessWithAgents(transcript)
+              await processWithAgents(transcript)
               break
             case 'response.done':
               console.log('Response generation completed')
@@ -243,7 +252,7 @@ function App() {
       // Connect to realtime API with ephemeral key
       const region = 'eastus2'
       const deployment = 'gpt-realtime'
-      const url = `https://${region}.realtimeapi-preview.ai.azure.com/v1/realtimertc?model=${deployment}/api-version=2025-08-28`
+      const url = `https://${region}.realtimeapi-preview.ai.azure.com/v1/realtimertc?model=${deployment}&api-version=2025-08-28`
 
       const sdpResponse = await fetch(url, {
         method: 'POST',
@@ -299,6 +308,23 @@ function App() {
     }
   }
 
+  const getAgentLabel = (agent: string) => {
+    switch (agent) {
+      case 'intake':
+        return '👨‍⚕️ Intake Nurse'
+      case 'clinical-guidance':
+        return '🩺 Clinical Specialist'
+      case 'access':
+        return '🏥 Access Coordinator'
+      case 'pre-visit':
+        return '📋 Pre-Visit Assistant'
+      case 'coverage':
+        return '💳 Coverage Specialist'
+      default:
+        return '🤖 Assistant'
+    }
+  }
+
   return (
     <div className="chat-container">
       <div className="chat-header">
@@ -312,7 +338,7 @@ function App() {
             <h1>Virtual Health Assistant</h1>
             <p className="status">
               <span className="status-dot"></span>
-              {isConnected ? `Connected - ${currentAgent === 'intake' ? 'Intake Nurse' : 'Clinical Specialist'}` : 'Offline'}
+              {isConnected ? `Connected - ${getAgentLabel(currentAgent)}` : 'Offline'}
             </p>
           </div>
         </div>
@@ -324,7 +350,7 @@ function App() {
             <div className="message-bubble">
               {message.agent && (
                 <div className="agent-badge">
-                  {message.agent === 'intake' ? '👨‍⚕️ Intake Nurse' : '🩺 Clinical Specialist'}
+                  {getAgentLabel(message.agent)}
                 </div>
               )}
               <p>{message.text}</p>
