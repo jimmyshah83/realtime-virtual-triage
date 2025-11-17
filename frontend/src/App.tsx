@@ -6,6 +6,12 @@ interface Message {
   text: string
   sender: 'user' | 'bot'
   timestamp: Date
+  agent?: 'intake' | 'clinical-guidance' | 'access' | 'pre-visit' | 'coverage'
+}
+
+interface RealtimeEvent {
+  type: string
+  [key: string]: any
 }
 
 function App() {
@@ -14,18 +20,21 @@ function App() {
       id: 1,
       text: "Hello! I'm your virtual health assistant. How can I help you today?",
       sender: 'bot',
-      timestamp: new Date()
+      timestamp: new Date(),
+      agent: 'intake'
     }
   ])
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
+  const [currentAgent, setCurrentAgent] = useState<'intake' | 'clinical-guidance' | 'access' | 'pre-visit' | 'coverage'>('intake')
+  const [sessionId, setSessionId] = useState<string | null>(null)
   
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
 
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     if (inputText.trim()) {
       const newMessage: Message = {
         id: messages.length + 1,
@@ -33,8 +42,65 @@ function App() {
         sender: 'user',
         timestamp: new Date()
       }
-      setMessages([...messages, newMessage])
+      setMessages(prev => [...prev, newMessage])
+      if (sessionId) {
+        await prcocessWithAgents(inputText)
+      }
       setInputText('')
+    }
+  }
+
+  const prcocessWithAgents = async (userInput: string) => {
+    try {
+      const sessionResponse = await fetch(`http://localhost:8000/chat/${sessionId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({message: userInput})
+      })
+      
+      if (!sessionResponse.ok) {
+        throw new Error(`Failed to process message with agents: ${sessionResponse.statusText}`)
+      }
+      
+      const responseData = await sessionResponse.json()
+
+      setCurrentAgent(responseData.current_agent)
+
+      const agentMessage: Message = {
+        id: messages.length + 2,
+        text: responseData.response,
+        sender: 'bot',
+        timestamp: new Date(),
+        agent: responseData.current_agent
+      }
+      setMessages(prev => [...prev, agentMessage])
+
+      if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
+        const responseEvent: RealtimeEvent = {
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'assistant',
+            content: [{
+              type: 'text',
+              text: responseData.response,
+            }]
+          }
+        }
+
+        dataChannelRef.current.send(JSON.stringify(responseEvent))
+
+        const generateEvent: RealtimeEvent = {
+          type: 'response.create',
+        }
+
+        dataChannelRef.current.send(JSON.stringify(generateEvent))
+      }
+    }
+    catch (error) {
+      console.error('Error processing message with agents:', error)
     }
   }
 
@@ -60,6 +126,23 @@ function App() {
   const startRealtimeSession = async () => {
     try {
       setIsRecording(true)
+
+      const sessionResponse = await fetch('http://localhost:8000/session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      })
+
+      if (!sessionResponse.ok) {
+        throw new Error(`Failed to create session: ${sessionResponse.statusText}`)
+      }
+
+      const sessionData = await sessionResponse.json()
+      const ephemeralKey = sessionData.client_secret?.value
+      const newSessioonId = sessionData.id
+
+      setSessionId(newSessioonId)
       
       // Create a peer connection
       const pc = new RTCPeerConnection()
@@ -81,22 +164,68 @@ function App() {
       pc.addTrack(ms.getTracks()[0])
 
       // Set up data channel for sending and receiving events
-      const dc = pc.createDataChannel('oai-events')
+      const dc = pc.createDataChannel('realtime-channel')
       dataChannelRef.current = dc
 
       dc.onopen = () => {
         console.log('Data channel opened')
         setIsConnected(true)
+
+      const sessionUpdate: RealtimeEvent = {
+        type: 'session.update',
+        session: {
+          turn_detection: {
+            type: 'server_vad',
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 500
+          }, 
+          input_audio_transcription: {
+            model: 'whisper-1', 
+          },
+        }
+      }
+      dc.send(JSON.stringify(sessionUpdate))
+        
       }
 
-      dc.onmessage = (event) => {
-        console.log('Received message:', event.data)
+      dc.onmessage = async (event) => {
+        console.log('Received realtime event:', event.data)
         // Handle events from the realtime API
         try {
-          const message = JSON.parse(event.data)
-          console.log('Parsed message:', message)
+          const realtimeEvent: RealtimeEvent = JSON.parse(event.data)
+          console.log('Parsed event type:', realtimeEvent.type)
+
           // You can handle different message types here
-        } catch (err) {
+          switch (realtimeEvent.type) {
+            case 'conversation.item.input_audio_transcription.completed':
+              const transcript = realtimeEvent.transcript
+              console.log('Transcription completed:', transcript)
+
+              const userMessage: Message = {
+                id: messages.length + 1,
+                text: transcript,
+                sender: 'user',
+                timestamp: new Date()
+              }
+              setMessages(prev => [...prev, userMessage])
+
+              await prcocessWithAgents(transcript)
+              break
+            case 'response.done':
+              console.log('Response generation completed')
+              break
+
+            case 'response.error':
+              console.error('Error during response generation:', realtimeEvent.error)
+              break
+
+            default:
+              console.log('Unhandled event type:', realtimeEvent.type)
+              break
+            }
+          }
+        catch (err) {
           console.error('Error parsing message:', err)
         }
       }
@@ -111,10 +240,16 @@ function App() {
       const offer = await pc.createOffer()
       await pc.setLocalDescription(offer)
 
-      const sdpResponse = await fetch('http://localhost:8000/session', {
+      // Connect to realtime API with ephemeral key
+      const region = 'eastus2'
+      const deployment = 'gpt-realtime'
+      const url = `https://${region}.realtimeapi-preview.ai.azure.com/v1/realtimertc?model=${deployment}/api-version=2025-08-28`
+
+      const sdpResponse = await fetch(url, {
         method: 'POST',
         body: offer.sdp,
         headers: {
+          'Authorization': `Bearer ${ephemeralKey}`,
           'Content-Type': 'application/sdp',
         },
       })
@@ -177,7 +312,7 @@ function App() {
             <h1>Virtual Health Assistant</h1>
             <p className="status">
               <span className="status-dot"></span>
-              Online
+              {isConnected ? `Connected - ${currentAgent === 'intake' ? 'Intake Nurse' : 'Clinical Specialist'}` : 'Offline'}
             </p>
           </div>
         </div>
@@ -187,6 +322,11 @@ function App() {
         {messages.map((message) => (
           <div key={message.id} className={`message ${message.sender}`}>
             <div className="message-bubble">
+              {message.agent && (
+                <div className="agent-badge">
+                  {message.agent === 'intake' ? '👨‍⚕️ Intake Nurse' : '🩺 Clinical Specialist'}
+                </div>
+              )}
               <p>{message.text}</p>
               <span className="message-time">
                 {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
