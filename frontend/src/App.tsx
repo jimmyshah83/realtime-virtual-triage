@@ -1,56 +1,17 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
-type AgentRole = 'intake' | 'clinical-guidance' | 'access' | 'pre-visit' | 'coverage' | 'triage' | 'referral_builder'
-
 interface Message {
   id: number
   text: string
   sender: 'user' | 'bot'
   timestamp: Date
-  agent?: AgentRole
+  agent?: 'intake' | 'clinical-guidance' | 'access' | 'pre-visit' | 'coverage'
 }
 
 interface RealtimeEvent {
   type: string
   [key: string]: any
-}
-
-interface MedicalCodes {
-  snomed_codes?: string[]
-  icd_codes?: string[]
-}
-
-interface PatientInfo {
-  name?: string | null
-  age?: number | null
-  gender?: string | null
-  contact?: string | null
-  medical_history?: string[]
-  medications?: string[]
-  allergies?: string[]
-}
-
-interface ChatResponsePayload {
-  current_agent: AgentRole
-  response: string
-  urgency: number
-  red_flags: string[]
-  handoff_ready: boolean
-  referral_complete: boolean
-  symptoms: string[]
-  chief_complaint?: string | null
-  assessment?: string | null
-  medical_codes?: MedicalCodes | null
-  patient_info?: PatientInfo | null
-}
-
-interface SessionResponsePayload {
-  session_id: string
-  client_secret: { value: string }
-  model: string
-  voice: string
-  session_ttl_seconds: number
 }
 
 function App() {
@@ -66,18 +27,9 @@ function App() {
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
-  const [currentAgent, setCurrentAgent] = useState<AgentRole>('intake')
+  const [currentAgent, setCurrentAgent] = useState<'intake' | 'clinical-guidance' | 'access' | 'pre-visit' | 'coverage'>('intake')
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const [triageSummary, setTriageSummary] = useState({
-    urgency: 0,
-    redFlags: [] as string[],
-    symptoms: [] as string[],
-    chiefComplaint: '',
-    assessment: ''
-  })
-  const [patientInfo, setPatientInfo] = useState<PatientInfo | null>(null)
-  const [sessionMeta, setSessionMeta] = useState<{ model: string; voice: string; ttl: number } | null>(null)
-
+  
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
@@ -96,73 +48,8 @@ function App() {
       
       setInputText('')
       
-      if (sessionId) {
-        await processWithAgents(messageText)
-      }
-    }
-  }
-
-  const processWithAgents = async (userInput: string) => {
-    try {
-      const sessionResponse = await fetch(`http://localhost:8000/chat/${sessionId}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({message: userInput})
-      })
-      
-      if (!sessionResponse.ok) {
-        throw new Error(`Failed to process message with agents: ${sessionResponse.statusText}`)
-      }
-      
-      const responseData: ChatResponsePayload = await sessionResponse.json()
-
-      setCurrentAgent(responseData.current_agent)
-      setTriageSummary({
-        urgency: responseData.urgency ?? 0,
-        redFlags: responseData.red_flags ?? [],
-        symptoms: responseData.symptoms ?? [],
-        chiefComplaint: responseData.chief_complaint ?? '',
-        assessment: responseData.assessment ?? ''
-      })
-      setPatientInfo(responseData.patient_info ?? null)
-
-      setMessages(prev => {
-        const agentMessage: Message = {
-          id: prev.length + 1,
-          text: responseData.response,
-          sender: 'bot',
-          timestamp: new Date(),
-          agent: responseData.current_agent
-        }
-        return [...prev, agentMessage]
-      })
-
-      if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
-        const responseEvent: RealtimeEvent = {
-          type: 'conversation.item.create',
-          item: {
-            type: 'message',
-            role: 'assistant',
-            content: [{
-              type: 'text',
-              text: responseData.response,
-            }]
-          }
-        }
-
-        dataChannelRef.current.send(JSON.stringify(responseEvent))
-
-        const generateEvent: RealtimeEvent = {
-          type: 'response.create',
-        }
-
-        dataChannelRef.current.send(JSON.stringify(generateEvent))
-      }
-    }
-    catch (error) {
-      console.error('Error processing message with agents:', error)
+      // Note: For voice-based interaction, typed messages are sent directly to realtime API via data channel
+      // The function calling pattern handles agent orchestration automatically
     }
   }
 
@@ -200,16 +87,11 @@ function App() {
         throw new Error(`Failed to create session: ${sessionResponse.statusText}`)
       }
 
-      const sessionData: SessionResponsePayload = await sessionResponse.json()
+      const sessionData = await sessionResponse.json()
       const ephemeralKey = sessionData.client_secret?.value
-      const newSessionId = sessionData.session_id
-
-      if (!ephemeralKey || !newSessionId) {
-        throw new Error('Session response missing credentials')
-      }
+      const newSessionId = sessionData.id
 
       setSessionId(newSessionId)
-      setSessionMeta({ model: sessionData.model, voice: sessionData.voice, ttl: sessionData.session_ttl_seconds })
       
       // Create a peer connection
       const pc = new RTCPeerConnection()
@@ -462,7 +344,7 @@ function App() {
     }
   }
 
-  const getAgentLabel = (agent: AgentRole) => {
+  const getAgentLabel = (agent: string) => {
     switch (agent) {
       case 'intake':
         return '👨‍⚕️ Intake Nurse'
@@ -474,10 +356,6 @@ function App() {
         return '📋 Pre-Visit Assistant'
       case 'coverage':
         return '💳 Coverage Specialist'
-      case 'triage':
-        return '🩺 Triage Nurse'
-      case 'referral_builder':
-        return '📨 Referral Builder'
       default:
         return '🤖 Assistant'
     }
@@ -498,49 +376,9 @@ function App() {
               <span className="status-dot"></span>
               {isConnected ? `Connected - ${getAgentLabel(currentAgent)}` : 'Offline'}
             </p>
-            {sessionMeta && isConnected && (
-              <p className="session-meta">
-                {sessionMeta.model} • {sessionMeta.voice} • TTL {Math.round(sessionMeta.ttl / 60)}m
-              </p>
-            )}
           </div>
         </div>
       </div>
-
-      {(triageSummary.urgency > 0 || triageSummary.redFlags.length > 0 || triageSummary.symptoms.length > 0) && (
-        <div className="triage-summary">
-          <div>
-            <strong>Urgency:</strong> {triageSummary.urgency ? `${triageSummary.urgency}/5` : 'Evaluating'}
-          </div>
-          {triageSummary.redFlags.length > 0 && (
-            <div className="red-flags">
-              <strong>⚠️ Red Flags:</strong> {triageSummary.redFlags.join(', ')}
-            </div>
-          )}
-          {triageSummary.symptoms.length > 0 && (
-            <div>
-              <strong>Symptoms:</strong> {triageSummary.symptoms.join(', ')}
-            </div>
-          )}
-          {triageSummary.chiefComplaint && (
-            <div>
-              <strong>Chief Complaint:</strong> {triageSummary.chiefComplaint}
-            </div>
-          )}
-          {triageSummary.assessment && (
-            <div>
-              <strong>Assessment:</strong> {triageSummary.assessment}
-            </div>
-          )}
-          {patientInfo && (patientInfo.name || patientInfo.age || patientInfo.gender) && (
-            <div>
-              <strong>Patient:</strong> {[patientInfo.name, patientInfo.age ? `${patientInfo.age}y` : null, patientInfo.gender]
-                .filter(Boolean)
-                .join(' • ')}
-            </div>
-          )}
-        </div>
-      )}
 
       <div className="chat-messages">
         {messages.map((message) => (

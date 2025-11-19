@@ -1,33 +1,20 @@
 """Main FastAPI application entry point."""
 
-import logging
+import json
 import os
-import sys
-import time
-from pathlib import Path
-from typing import Any, Dict, Optional
-from uuid import uuid4
-
-# Add backend directory to Python path for imports when running as script
-_backend_dir = Path(__file__).parent.parent
-if str(_backend_dir) not in sys.path:
-    sys.path.insert(0, str(_backend_dir))
+from typing import Any, Dict
 
 import httpx
-import threading
-from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
-from app.agents import triage_graph, TriageAgentState, PatientInfo, MedicalCodes
+from .agents import triage_graph, TriageAgentState, PatientInfo, MedicalCodes
 
 # Load environment variables from .env file
 load_dotenv()
-
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Real-time Virtual Triage",
@@ -44,127 +31,115 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Session management (use Redis/DB for production)
-SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
+# In-memory session storage (use Redis/DB for production)
 sessions: Dict[str, TriageAgentState] = {}
-session_activity: Dict[str, float] = {}
 
-# Token caching variables for DefaultAzureCredential
-cached_token: Optional[str] = None
-token_expiry: float = 0
-token_lock = threading.Lock()
-
-
-def _default_session_state() -> TriageAgentState:
-    return {
-        "messages": [],
-        "symptoms": [],
-        "patient_info": PatientInfo(),
-        "urgency_score": 0,
-        "red_flags": [],
-        "medical_codes": MedicalCodes(),
-        "referral_package": None,
-        "current_agent": "triage",
-        "handoff_ready": False,
-        "chief_complaint": "",
-        "assessment": "",
+# Function definitions for Realtime API
+TRIAGE_FUNCTIONS = [
+    {
+        "type": "function",
+        "name": "perform_triage_assessment",
+        "description": "Perform clinical triage assessment when you have collected sufficient patient information including: chief complaint, symptoms with onset/duration/severity details, and relevant medical history. This will analyze urgency and detect any red flag symptoms.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chief_complaint": {
+                    "type": "string",
+                    "description": "The patient's primary reason for seeking care"
+                },
+                "symptoms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of all reported symptoms"
+                },
+                "symptom_details": {
+                    "type": "string",
+                    "description": "Comprehensive details about symptoms including onset time, duration, severity (1-10), character/quality, location, and any aggravating or relieving factors"
+                },
+                "medical_history": {
+                    "type": "string",
+                    "description": "Relevant medical history including chronic conditions, current medications, allergies, and recent hospitalizations"
+                },
+                "patient_name": {
+                    "type": "string",
+                    "description": "Patient's name if provided"
+                },
+                "patient_age": {
+                    "type": "integer",
+                    "description": "Patient's age if provided"
+                },
+                "patient_gender": {
+                    "type": "string",
+                    "description": "Patient's gender if provided"
+                }
+            },
+            "required": ["chief_complaint", "symptoms", "symptom_details"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "build_referral_package",
+        "description": "Create a comprehensive referral package after triage assessment is complete. This generates a detailed medical referral with all patient information, assessment, codes, and disposition recommendation. Only call this after perform_triage_assessment has been successfully executed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "include_full_details": {
+                    "type": "boolean",
+                    "description": "Whether to include full clinical details in the referral package",
+                    "default": True
+                }
+            }
+        }
     }
+]
 
+REALTIME_INSTRUCTIONS = """
+You are a compassionate and professional triage nurse conducting a clinical assessment.
 
-def _touch_session(session_id: str) -> None:
-    session_activity[session_id] = time.time()
+Your responsibilities:
+1. Warmly greet the patient and gather their chief complaint
+2. Ask focused questions one at a time about:
+   - Symptom onset (when did it start?)
+   - Duration (how long has it been happening?)
+   - Severity (on a scale of 1-10, how bad is it?)
+   - Character (describe what it feels like)
+   - Location (where exactly?)
+   - Associated symptoms
+   - What makes it better or worse?
+3. Collect relevant medical history, current medications, and allergies
+4. Listen carefully for RED FLAG symptoms that need immediate attention
 
+When you have gathered:
+- Clear chief complaint
+- Detailed symptom information (onset, duration, severity, character)
+- Relevant medical history
 
-def _purge_expired_sessions() -> None:
-    if not session_activity:
-        return
-    now = time.time()
-    expired = [sid for sid, last_active in session_activity.items() if now - last_active > SESSION_TTL_SECONDS]
-    for sid in expired:
-        sessions.pop(sid, None)
-        session_activity.pop(sid, None)
-        logger.info("Purged inactive session %s", sid)
+CALL the perform_triage_assessment function to get the clinical analysis.
 
+After receiving the triage results, explain the urgency level and any red flags to the patient in clear, reassuring language. Then ask if they would like you to prepare a referral package, and if yes, call the build_referral_package function.
 
-def get_bearer_token(resource_scope: str) -> str:
-    """Get a bearer token using DefaultAzureCredential with caching."""
-    global cached_token, token_expiry
-    
-    current_time = time.time()
-    
-    # Check if we have a valid cached token (with 5 minute buffer before expiry)
-    with token_lock:
-        if cached_token and current_time < (token_expiry - 300):
-            return cached_token
-    
-    # Get a new token
-    try:
-        credential = DefaultAzureCredential()
-        token = credential.get_token(resource_scope)
-        
-        with token_lock:
-            cached_token = token.token
-            token_expiry = token.expires_on
-            
-        logger.info(f"Acquired new bearer token, expires at: {time.ctime(token_expiry)}")
-        return cached_token
-        
-    except Exception as e:
-        logger.error(f"Failed to acquire bearer token: {e}")
-        raise
-
+Be empathetic, clear, and professional throughout the conversation."""
 
 # Request/Response models
-class PatientInfoUpdate(BaseModel):
-    """Partial patient info update payload."""
+class FunctionCallRequest(BaseModel):
+    """Function call request from Realtime API."""
+    call_id: str
+    name: str
+    arguments: str  # JSON string
 
-    name: Optional[str] = None
-    age: Optional[int] = None
-    gender: Optional[str] = None
-    contact: Optional[str] = None
-    medical_history: Optional[list[str]] = None
-    medications: Optional[list[str]] = None
-    allergies: Optional[list[str]] = None
+class TriageAssessmentArgs(BaseModel):
+    """Arguments for perform_triage_assessment function."""
+    chief_complaint: str
+    symptoms: list[str]
+    symptom_details: str
+    medical_history: str = ""
+    patient_name: str | None = None
+    patient_age: int | None = None
+    patient_gender: str | None = None
 
-
-class ChatRequest(BaseModel):
-    """Chat request model."""
-    message: str
-    transcript_id: Optional[str] = None
-    latency_ms: Optional[int] = None
-    patient_info: Optional[PatientInfoUpdate] = None
-
-
-class ChatResponse(BaseModel):
-    """Chat response model."""
-    current_agent: str
-    response: str
-    urgency: int = 0
-    red_flags: list[str] = []
-    handoff_ready: bool = False
-    referral_complete: bool = False
-    symptoms: list[str] = []
-    chief_complaint: Optional[str] = None
-    assessment: Optional[str] = None
-    medical_codes: Optional[MedicalCodes] = None
-    patient_info: Optional[PatientInfo] = None
-
-
-class ClientSecret(BaseModel):
-    """Ephemeral key payload returned by Azure OpenAI."""
-
-    value: str
-    expires_at: Optional[int] = None
-
-
-class SessionResponse(BaseModel):
-    """Response body for Azure Realtime session creation."""
-
-    session_id: str
-    client_secret: ClientSecret
-    model: str
-    voice: str
-    session_ttl_seconds: int
+class ReferralPackageArgs(BaseModel):
+    """Arguments for build_referral_package function."""
+    include_full_details: bool = True
 
 
 @app.get("/")
@@ -179,114 +154,57 @@ async def health():
     return {"status": "healthy"}
 
 
-@app.post("/session", response_model=SessionResponse)
-async def create_session() -> SessionResponse:
-    """Generate an ephemeral key for Azure OpenAI Realtime session."""
+@app.post("/session")
+async def create_session() -> Response:
+    """Generate an ephemeral key for Azure OpenAI Realtime session with function tools."""
     try:
+        api_key = os.environ["AZURE_OPENAI_API_KEY"]
+        resource_name = os.environ["AZURE_OPENAI_RESOURCE_NAME"]
+        api_version = os.environ["AZURE_OPENAI_API_VERSION"]
         deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
-        voice = os.getenv("AZURE_OPENAI_REALTIME_VOICE", "alloy") or "alloy"
-        session_type = os.getenv("AZURE_OPENAI_SESSION_TYPE", "realtime") or "realtime"
-        session_instructions = os.getenv("AZURE_OPENAI_SESSION_INSTRUCTIONS", "You are a helpful assistant.")
 
-        # Get Azure resource name - use AZURE_RESOURCE if provided, otherwise extract from endpoint
-        azure_resource = os.getenv("AZURE_RESOURCE")
-        if not azure_resource:
-            # Extract resource name from AZURE_OPENAI_ENDPOINT
-            endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
-            # Endpoint format: https://{resource}.openai.azure.com
-            if endpoint:
-                # Remove protocol and path
-                resource_part = endpoint.replace("https://", "").replace("http://", "").split("/")[0]
-                # Extract resource name (everything before .openai.azure.com)
-                if ".openai.azure.com" in resource_part:
-                    azure_resource = resource_part.split(".openai.azure.com")[0]
-                else:
-                    # Fallback: use the whole hostname
-                    azure_resource = resource_part.split(".")[0]
-            else:
-                raise ValueError("Either AZURE_RESOURCE or AZURE_OPENAI_ENDPOINT must be set")
+        session_url = f"https://{resource_name}.openai.azure.com/openai/realtimeapi/sessions?api-version={api_version}"
 
-        # Get bearer token using DefaultAzureCredential
-        bearer_token = get_bearer_token("https://cognitiveservices.azure.com/.default")
-
-        # Construct the Azure OpenAI endpoint URL
-        session_url = f"https://{azure_resource}.openai.azure.com/openai/v1/realtime/client_secrets"
-        logger.info("Creating Azure Realtime session at %s", session_url)
-        logger.debug("Realtime session payload: model=%s voice=%s session_type=%s", deployment, voice, session_type)
-
-        payload = {
-            "session": {
-                "type": session_type,
-                "model": deployment,
-                "instructions": session_instructions,
-                "audio": {
-                    "output": {
-                        "voice": voice,
-                    }
-                },
-            },
-        }
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 session_url,
-                json=payload,
+                json={
+                    "model": deployment,
+                    "voice": "alloy",
+                    "instructions": REALTIME_INSTRUCTIONS,
+                    "tools": TRIAGE_FUNCTIONS,
+                    "tool_choice": "auto"
+                },
                 headers={
-                    "Authorization": f"Bearer {bearer_token}",
+                    "api-key": api_key,
                     "Content-Type": "application/json"
                 }
             )
 
             if response.status_code != 200:
-                logger.error("Request failed with status %s", response.status_code)
-                logger.error("Response headers: %s", dict(response.headers))
-                logger.error("Response content: %s", response.text)
-                raise HTTPException(
+                return Response(
+                    content=json.dumps(
+                        {
+                            "error": "Failed to create session",
+                            "details": response.text
+                        }
+                    ),
                     status_code=response.status_code,
-                    detail={
-                        "error": "Failed to create session",
-                        "azure_status": response.status_code,
-                        "body": response.text,
-                    },
+                    media_type="application/json"
                 )
 
-            session_payload = response.json()
-            client_secret_payload = session_payload.get("client_secret") or {}
-            secret_value = client_secret_payload.get("value") or session_payload.get("value")
-
-            if not secret_value:
-                logger.error("Azure response missing client secret: %s", session_payload)
-                raise HTTPException(status_code=500, detail="Azure response missing client secret")
-
-            session_id = (
-                session_payload.get("session_id")
-                or session_payload.get("id")
-                or session_payload.get("session", {}).get("id")
+            return Response(
+                content=response.content,
+                status_code=response.status_code,
+                media_type="application/json"
             )
 
-            if not session_id:
-                logger.warning("Azure response missing session id, generating fallback id")
-                session_id = str(uuid4())
-
-            sessions.setdefault(session_id, _default_session_state())
-            _touch_session(session_id)
-
-            return SessionResponse(
-                session_id=session_id,
-                client_secret=ClientSecret(
-                    value=secret_value,
-                    expires_at=client_secret_payload.get("expires_at"),
-                ),
-                model=session_payload.get("model", deployment),
-                voice=session_payload.get("voice", "alloy"),
-                session_ttl_seconds=SESSION_TTL_SECONDS,
-            )
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Unexpected error creating session")
-        raise HTTPException(status_code=500, detail={"error": str(exc)}) from exc
+    except Exception as e:  # noqa: BLE001
+        return Response(
+            content=json.dumps({"error": str(e)}),
+            status_code=500,
+            media_type="application/json"
+        )
 
 
 @app.post("/function/{session_id}")
@@ -300,50 +218,101 @@ async def execute_function(session_id: str, function_call: FunctionCallRequest):
     Returns:
         Function execution result with call_id and output
     """
-    _purge_expired_sessions()
-
     # Initialize or retrieve session state
     if session_id not in sessions:
-        logger.info("Initializing new session state for %s", session_id)
-        sessions[session_id] = _default_session_state()
-
-    state = sessions[session_id]
-    _touch_session(session_id)
-
-    # Merge patient info updates if provided
-    if chat_request.patient_info:
-        existing_info = state.get("patient_info", PatientInfo())
-        updates = chat_request.patient_info.model_dump(exclude_none=True)
-        state["patient_info"] = existing_info.model_copy(update=updates)
+        sessions[session_id] = {  # type: ignore[typeddict-item]
+            "messages": [],
+            "symptoms": [],
+            "patient_info": PatientInfo(),
+            "urgency_score": 0,
+            "red_flags": [],
+            "medical_codes": MedicalCodes(),
+            "referral_package": None,
+            "current_agent": "triage",
+            "handoff_ready": False,
+            "chief_complaint": "",
+            "assessment": ""
+        }
     
-    # Add user message to conversation history
-    state["messages"].append(HumanMessage(content=chat_request.message))
+    state = sessions[session_id]
     
     try:
-        # Invoke the agent graph
-        result: Any = triage_graph.invoke(state)
+        if function_call.name == "perform_triage_assessment":
+            # Parse function arguments
+            args_dict = json.loads(function_call.arguments)
+            args = TriageAssessmentArgs(**args_dict)
+            
+            # Update patient info if provided
+            if args.patient_name or args.patient_age or args.patient_gender:
+                state["patient_info"] = PatientInfo(
+                    name=args.patient_name,
+                    age=args.patient_age,
+                    gender=args.patient_gender
+                )
+            
+            # Build conversation context for triage agent
+            context = f"""Patient Triage Information:
+            
+Chief Complaint: {args.chief_complaint}
+
+Symptoms: {', '.join(args.symptoms)}
+
+Symptom Details: {args.symptom_details}
+
+Medical History: {args.medical_history or 'None provided'}
+            """
+            
+            state["messages"].append(HumanMessage(content=context))
+            state["chief_complaint"] = args.chief_complaint
+            
+            # Invoke triage agent through LangGraph
+            result: Any = triage_graph.invoke(state)
+            sessions[session_id] = result  # type: ignore[typeddict-item]
+            
+            # Build structured output for Realtime API
+            urgency_labels = ["Routine", "Low Priority", "Moderate", "Urgent", "Critical/Emergency"]
+            urgency_score = result.get("urgency_score", 1)
+            
+            output_data = {
+                "success": True,
+                "urgency_score": urgency_score,
+                "urgency_level": urgency_labels[min(urgency_score - 1, 4)],
+                "red_flags": result.get("red_flags", []),
+                "red_flags_detected": len(result.get("red_flags", [])) > 0,
+                "assessment_summary": result.get("assessment", ""),
+                "symptoms_documented": result.get("symptoms", []),
+                "medical_codes": {
+                    "icd10": result.get("medical_codes", MedicalCodes()).icd_codes,
+                    "snomed": result.get("medical_codes", MedicalCodes()).snomed_codes
+                },
+                "recommendation": "Speak the urgency level and any red flags to the patient. Ask if they would like a referral package prepared."
+            }
+            
+            return {
+                "call_id": function_call.call_id,
+                "output": json.dumps(output_data)
+            }
         
-        # Update session state
-        sessions[session_id] = result
-        
-        # Build response message
-        current_agent = result.get("current_agent", "triage")
-        
-        if current_agent == "triage":
-            if result.get("handoff_ready"):
-                response_text = "Thank you. I've completed the triage assessment.\n\n"
-                response_text += f"Urgency Level: {result.get('urgency_score', 0)}/5\n"
-                if result.get("red_flags"):
-                    response_text += f"⚠️ Red Flags: {', '.join(result['red_flags'])}\n"
-                response_text += "\nI'm now preparing your referral package..."
-            else:
-                response_text = "I'm gathering your information. "
-                if result.get("symptoms"):
-                    response_text += f"So far, you've mentioned: {', '.join(result['symptoms'])}. "
-                response_text += "Can you tell me more about when these symptoms started and their severity?"
-        
-        elif current_agent == "referral_builder":
-            referral = result.get("referral_package")
+        elif function_call.name == "build_referral_package":
+            # Parse arguments (if any)
+            args_dict = json.loads(function_call.arguments) if function_call.arguments else {}
+            
+            # Ensure triage was completed first
+            if not state.get("handoff_ready") or state.get("urgency_score", 0) == 0:
+                return {
+                    "call_id": function_call.call_id,
+                    "output": json.dumps({
+                        "success": False,
+                        "error": "Triage assessment must be completed before building referral package"
+                    })
+                }
+            
+            # Invoke referral builder through LangGraph
+            referral_result: Any = triage_graph.invoke(state)
+            sessions[session_id] = referral_result  # type: ignore[typeddict-item]
+            
+            referral = referral_result.get("referral_package")
+            
             if referral:
                 output_data = {
                     "success": True,
@@ -357,30 +326,30 @@ async def execute_function(session_id: str, function_call: FunctionCallRequest):
                     "recommendation": "Inform the patient that their referral package has been created and will be sent to the appropriate care facility."
                 }
             else:
-                response_text = "Building your referral package..."
+                output_data = {
+                    "success": False,
+                    "error": "Failed to generate referral package"
+                }
+            
+            return {
+                "call_id": function_call.call_id,
+                "output": json.dumps(output_data)
+            }
+        
         else:
-            response_text = "Processing your request..."
-        
-        # Add AI response to conversation history
-        result["messages"].append(AIMessage(content=response_text))
-        sessions[session_id] = result  # type: ignore[typeddict-item]
-        
-        return ChatResponse(
-            current_agent=current_agent,
-            response=response_text,
-            urgency=result.get("urgency_score", 0),
-            red_flags=result.get("red_flags", []),
-            handoff_ready=result.get("handoff_ready", False),
-            referral_complete=result.get("referral_package") is not None,
-            symptoms=result.get("symptoms", []),
-            chief_complaint=result.get("chief_complaint"),
-            assessment=result.get("assessment"),
-            medical_codes=result.get("medical_codes"),
-            patient_info=result.get("patient_info"),
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}") from e
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown function: {function_call.name}"
+            )
+    
+    except Exception as e:  # noqa: BLE001
+        return {
+            "call_id": function_call.call_id,
+            "output": json.dumps({
+                "success": False,
+                "error": f"Function execution error: {str(e)}"
+            })
+        }
 
 
 @app.delete("/chat/{session_id}")
@@ -388,7 +357,6 @@ async def delete_session(session_id: str):
     """Delete a chat session."""
     if session_id in sessions:
         del sessions[session_id]
-        session_activity.pop(session_id, None)
         return {"message": "Session deleted"}
     raise HTTPException(status_code=404, detail="Session not found")
 
@@ -407,8 +375,5 @@ async def get_session(session_id: str):
         "symptoms": state.get("symptoms", []),
         "red_flags": state.get("red_flags", []),
         "handoff_ready": state.get("handoff_ready", False),
-        "referral_complete": state.get("referral_package") is not None,
-        "patient_info": state.get("patient_info"),
-        "medical_codes": state.get("medical_codes"),
-        "last_active": session_activity.get(session_id),
+        "referral_complete": state.get("referral_package") is not None
     }
