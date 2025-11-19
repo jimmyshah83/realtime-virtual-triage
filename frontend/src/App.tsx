@@ -46,68 +46,10 @@ function App() {
         return [...prev, newMessage]
       })
       
-      const messageText = inputText
       setInputText('')
       
-      if (sessionId) {
-        await processWithAgents(messageText)
-      }
-    }
-  }
-
-  const processWithAgents = async (userInput: string) => {
-    try {
-      const sessionResponse = await fetch(`http://localhost:8000/chat/${sessionId}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({message: userInput})
-      })
-      
-      if (!sessionResponse.ok) {
-        throw new Error(`Failed to process message with agents: ${sessionResponse.statusText}`)
-      }
-      
-      const responseData = await sessionResponse.json()
-
-      setCurrentAgent(responseData.current_agent)
-
-      setMessages(prev => {
-        const agentMessage: Message = {
-          id: prev.length + 1,
-          text: responseData.response,
-          sender: 'bot',
-          timestamp: new Date(),
-          agent: responseData.current_agent
-        }
-        return [...prev, agentMessage]
-      })
-
-      if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
-        const responseEvent: RealtimeEvent = {
-          type: 'conversation.item.create',
-          item: {
-            type: 'message',
-            role: 'assistant',
-            content: [{
-              type: 'text',
-              text: responseData.response,
-            }]
-          }
-        }
-
-        dataChannelRef.current.send(JSON.stringify(responseEvent))
-
-        const generateEvent: RealtimeEvent = {
-          type: 'response.create',
-        }
-
-        dataChannelRef.current.send(JSON.stringify(generateEvent))
-      }
-    }
-    catch (error) {
-      console.error('Error processing message with agents:', error)
+      // Note: For voice-based interaction, typed messages are sent directly to realtime API via data channel
+      // The function calling pattern handles agent orchestration automatically
     }
   }
 
@@ -218,9 +160,103 @@ function App() {
                 }
                 return [...prev, userMessage]
               })
-
-              await processWithAgents(transcript)
               break
+            
+            case 'response.function_call_arguments.done':
+              console.log('Function call completed:', realtimeEvent)
+              
+              // Extract function call details
+              const functionCall = realtimeEvent.item
+              const callId = functionCall.call_id
+              const functionName = functionCall.name
+              const functionArgs = functionCall.arguments
+              
+              console.log(`Executing function: ${functionName}`, functionArgs)
+              
+              try {
+                // Call backend function executor
+                const funcResponse = await fetch(`http://localhost:8000/function/${sessionId}`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({
+                    call_id: callId,
+                    name: functionName,
+                    arguments: functionArgs
+                  })
+                })
+                
+                if (!funcResponse.ok) {
+                  throw new Error(`Function execution failed: ${funcResponse.statusText}`)
+                }
+                
+                const funcResult = await funcResponse.json()
+                console.log('Function result:', funcResult)
+                
+                // Parse the output to update UI
+                const outputData = JSON.parse(funcResult.output)
+                
+                if (functionName === 'perform_triage_assessment' && outputData.success) {
+                  setCurrentAgent('clinical-guidance')
+                  
+                  // Show triage results in UI
+                  setMessages(prev => [...prev, {
+                    id: prev.length + 1,
+                    text: `🩺 Triage Assessment Complete:\n\nUrgency: ${outputData.urgency_level} (${outputData.urgency_score}/5)\n${outputData.red_flags_detected ? `⚠️ Red Flags: ${outputData.red_flags.join(', ')}` : '✓ No red flags detected'}\n\nAssessment: ${outputData.assessment_summary}`,
+                    sender: 'bot',
+                    timestamp: new Date(),
+                    agent: 'clinical-guidance'
+                  }])
+                } else if (functionName === 'build_referral_package' && outputData.success) {
+                  setCurrentAgent('pre-visit')
+                  
+                  // Show referral completion in UI
+                  setMessages(prev => [...prev, {
+                    id: prev.length + 1,
+                    text: `✅ Referral Package Created\n\nDisposition: ${outputData.disposition}\nPatient: ${outputData.patient_name}\n\n${outputData.referral_summary}`,
+                    sender: 'bot',
+                    timestamp: new Date(),
+                    agent: 'pre-visit'
+                  }])
+                }
+                
+                // Send function result back to Realtime API
+                if (dc.readyState === 'open') {
+                  dc.send(JSON.stringify({
+                    type: 'conversation.item.create',
+                    item: {
+                      type: 'function_call_output',
+                      call_id: funcResult.call_id,
+                      output: funcResult.output
+                    }
+                  }))
+                  
+                  // Trigger response generation to speak the results
+                  dc.send(JSON.stringify({
+                    type: 'response.create'
+                  }))
+                }
+              } catch (funcError) {
+                console.error('Error executing function:', funcError)
+                
+                // Send error back to Realtime API
+                if (dc.readyState === 'open') {
+                  dc.send(JSON.stringify({
+                    type: 'conversation.item.create',
+                    item: {
+                      type: 'function_call_output',
+                      call_id: callId,
+                      output: JSON.stringify({
+                        success: false,
+                        error: `Failed to execute function: ${funcError}`
+                      })
+                    }
+                  }))
+                }
+              }
+              break
+            
             case 'response.done':
               console.log('Response generation completed')
               break
