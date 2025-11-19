@@ -1,20 +1,28 @@
 """Langgraph Orchestration Agents Implementation."""
 
 import os
-from typing import TypedDict
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langchain_openai import AzureChatOpenAI
-from langchain.agents import create_agent
+from langchain.agents import create_agent, AgentState
+# from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.structured_output import ToolStrategy
 from pydantic import SecretStr, BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class AgentState(TypedDict):
+class TriageAgentState(AgentState):
     """State for the Triage Agent."""
     messages: list
+
+# class TriageAgentMiddleware(AgentMiddleware):
+#     """Middleware for Triage Agent to manage state transitions."""
+#     state_schema = TriageAgentState
+#     tools = []
+
+#     def before_model(self, state, runtime):
+#         return super().before_model(state, runtime)
 
 class IntakeAgent(BaseModel):
     """Intake Agent Response format."""
