@@ -134,19 +134,25 @@ async def create_session() -> SessionResponse:
     """Generate an ephemeral key for Azure OpenAI Realtime session."""
     try:
         api_key = os.environ["AZURE_OPENAI_API_KEY"]
-        resource_name = os.environ["AZURE_OPENAI_RESOURCE_NAME"]
         api_version = os.environ["AZURE_OPENAI_API_VERSION"]
         deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
+        voice = os.getenv("AZURE_OPENAI_REALTIME_VOICE", "alloy") or "alloy"
+        session_type = os.getenv("AZURE_OPENAI_SESSION_TYPE", "realtime_client") or "realtime_client"
 
-        session_url = f"https://{resource_name}.openai.azure.com/openai/realtimeapi/sessions?api-version={api_version}"
+        session_url = f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/realtime/client_secrets?api-version={api_version}"
+        logger.info("Creating Azure Realtime session at %s", session_url)
+        logger.debug("Realtime session payload: model=%s voice=%s session_type=%s", deployment, voice, session_type)
+
+        payload = {
+            "model": deployment,
+            "voice": voice,
+            "session_type": session_type,
+        }
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 session_url,
-                json={
-                    "model": deployment,
-                    "voice": "alloy"
-                },
+                json=payload,
                 headers={
                     "api-key": api_key,
                     "Content-Type": "application/json"
