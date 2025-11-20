@@ -3,8 +3,15 @@
 import json
 import logging
 import os
+import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+# Add backend directory to Python path for imports when running as script
+_backend_dir = Path(__file__).parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
 
 import httpx
 from dotenv import load_dotenv
@@ -13,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
 
-from .agents import triage_graph, TriageAgentState, PatientInfo, MedicalCodes
+from app.agents import triage_graph, TriageAgentState, PatientInfo, MedicalCodes
 
 # Load environment variables from .env file
 load_dotenv()

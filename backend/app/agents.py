@@ -1,6 +1,7 @@
 """Langgraph Orchestration Agents Implementation."""
 
 import os
+from pathlib import Path
 from typing import Optional, Literal
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
@@ -10,7 +11,25 @@ from pydantic import SecretStr, BaseModel, Field
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
 
-load_dotenv()
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(_BACKEND_ROOT / ".env", override=False)
+
+
+def _get_required_env(name: str) -> str:
+    """Return a required environment variable or raise a helpful error message."""
+    value = os.getenv(name)
+    if value:
+        return value
+
+    example_hint = (_BACKEND_ROOT / ".env.example").relative_to(_BACKEND_ROOT)
+    raise RuntimeError(
+        "Missing required Azure OpenAI setting '{name}'. "
+        "Create backend/.env (copy backend/{example} to backend/.env) "
+        "or export the variable before starting the API.".format(
+            name=name,
+            example=example_hint,
+        )
+    )
 
 
 # Pydantic Models for structured outputs
@@ -71,14 +90,19 @@ class TriageAgentState(TypedDict):
     chief_complaint: str
     assessment: str
 
-# Initialize Azure OpenAI model
-model = AzureChatOpenAI(
-    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-    azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
-    api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-    azure_ad_token=SecretStr(os.environ["AZURE_OPENAI_API_KEY"]),
-    temperature=0,
-)
+def _build_azure_model() -> AzureChatOpenAI:
+    """Construct the Azure OpenAI client with validated configuration."""
+    return AzureChatOpenAI(
+        azure_endpoint=_get_required_env("AZURE_OPENAI_ENDPOINT"),
+        azure_deployment=_get_required_env("AZURE_OPENAI_DEPLOYMENT_NAME"),
+        api_version=_get_required_env("AZURE_OPENAI_API_VERSION"),
+        azure_ad_token=SecretStr(_get_required_env("AZURE_OPENAI_API_KEY")),
+        temperature=0,
+    )
+
+
+# Initialize Azure OpenAI model once so agent nodes can reuse it
+model = _build_azure_model()
 
 
 TRIAGE_AGENT_SYSTEM_PROMPT: str = """

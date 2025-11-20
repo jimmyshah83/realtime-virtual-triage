@@ -4,15 +4,23 @@ FastAPI-based backend for real-time virtual triage system.
 
 ## Setup
 
-1. Install dependencies:
-```bash
-pip install -e .
-```
+1. Copy the sample environment file and add your Azure OpenAI details:
 
-2. For development dependencies:
-```bash
-pip install -e ".[dev]"
-```
+	```bash
+	cp .env.example .env
+	```
+
+2. Install dependencies:
+
+	```bash
+	pip install -e .
+	```
+
+3. For development dependencies:
+
+	```bash
+	pip install -e ".[dev]"
+	```
 
 ## Run
 
