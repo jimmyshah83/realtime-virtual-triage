@@ -1,6 +1,5 @@
 """Main FastAPI application entry point."""
 
-import json
 import logging
 import os
 import sys
@@ -14,6 +13,8 @@ if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
 
 import httpx
+import threading
+from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,6 +48,11 @@ SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
 sessions: Dict[str, TriageAgentState] = {}
 session_activity: Dict[str, float] = {}
 
+# Token caching variables for DefaultAzureCredential
+cached_token: Optional[str] = None
+token_expiry: float = 0
+token_lock = threading.Lock()
+
 
 def _default_session_state() -> TriageAgentState:
     return {
@@ -77,6 +83,35 @@ def _purge_expired_sessions() -> None:
         sessions.pop(sid, None)
         session_activity.pop(sid, None)
         logger.info("Purged inactive session %s", sid)
+
+
+def get_bearer_token(resource_scope: str) -> str:
+    """Get a bearer token using DefaultAzureCredential with caching."""
+    global cached_token, token_expiry
+    
+    current_time = time.time()
+    
+    # Check if we have a valid cached token (with 5 minute buffer before expiry)
+    with token_lock:
+        if cached_token and current_time < (token_expiry - 300):
+            return cached_token
+    
+    # Get a new token
+    try:
+        credential = DefaultAzureCredential()
+        token = credential.get_token(resource_scope)
+        
+        with token_lock:
+            cached_token = token.token
+            token_expiry = token.expires_on
+            
+        logger.info(f"Acquired new bearer token, expires at: {time.ctime(token_expiry)}")
+        return cached_token
+        
+    except Exception as e:
+        logger.error(f"Failed to acquire bearer token: {e}")
+        raise
+
 
 # Request/Response models
 class PatientInfoUpdate(BaseModel):
@@ -118,7 +153,6 @@ class SessionResponse(BaseModel):
     """Response body for Azure Realtime session creation."""
 
     session_id: str
-    client_secret: Dict[str, Any]
     model: str
     voice: str
     session_ttl_seconds: int
@@ -140,13 +174,34 @@ async def health():
 async def create_session() -> SessionResponse:
     """Generate an ephemeral key for Azure OpenAI Realtime session."""
     try:
-        api_key = os.environ["AZURE_OPENAI_API_KEY"]
         deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
         voice = os.getenv("AZURE_OPENAI_REALTIME_VOICE", "alloy") or "alloy"
         session_type = os.getenv("AZURE_OPENAI_SESSION_TYPE", "realtime") or "realtime"
         session_instructions = os.getenv("AZURE_OPENAI_SESSION_INSTRUCTIONS", "You are a helpful assistant.")
 
-        session_url = f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/realtime/client_secrets"
+        # Get Azure resource name - use AZURE_RESOURCE if provided, otherwise extract from endpoint
+        azure_resource = os.getenv("AZURE_RESOURCE")
+        if not azure_resource:
+            # Extract resource name from AZURE_OPENAI_ENDPOINT
+            endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+            # Endpoint format: https://{resource}.openai.azure.com
+            if endpoint:
+                # Remove protocol and path
+                resource_part = endpoint.replace("https://", "").replace("http://", "").split("/")[0]
+                # Extract resource name (everything before .openai.azure.com)
+                if ".openai.azure.com" in resource_part:
+                    azure_resource = resource_part.split(".openai.azure.com")[0]
+                else:
+                    # Fallback: use the whole hostname
+                    azure_resource = resource_part.split(".")[0]
+            else:
+                raise ValueError("Either AZURE_RESOURCE or AZURE_OPENAI_ENDPOINT must be set")
+
+        # Get bearer token using DefaultAzureCredential
+        bearer_token = get_bearer_token("https://cognitiveservices.azure.com/.default")
+
+        # Construct the Azure OpenAI endpoint URL
+        session_url = f"https://{azure_resource}.openai.azure.com/openai/v1/realtime/client_secrets"
         logger.info("Creating Azure Realtime session at %s", session_url)
         logger.debug("Realtime session payload: model=%s voice=%s session_type=%s", deployment, voice, session_type)
 
@@ -163,17 +218,20 @@ async def create_session() -> SessionResponse:
             },
         }
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 session_url,
                 json=payload,
                 headers={
-                    "api-key": api_key,
+                    "Authorization": f"Bearer {bearer_token}",
                     "Content-Type": "application/json"
                 }
             )
 
             if response.status_code != 200:
+                logger.error("Request failed with status %s", response.status_code)
+                logger.error("Response headers: %s", dict(response.headers))
+                logger.error("Response content: %s", response.text)
                 raise HTTPException(
                     status_code=response.status_code,
                     detail={
@@ -184,18 +242,17 @@ async def create_session() -> SessionResponse:
                 )
 
             session_payload = response.json()
-            session_id = session_payload.get("id")
-            client_secret = session_payload.get("client_secret")
+            session_id = session_payload.get('value', '')
 
-            if not session_id or not client_secret:
-                raise HTTPException(status_code=500, detail="Azure response missing session id or client secret")
+            if not session_id:
+                logger.error("No session id found in response: %s", session_payload)
+                raise HTTPException(status_code=500, detail="Azure response missing session id")
 
             sessions.setdefault(session_id, _default_session_state())
             _touch_session(session_id)
 
             return SessionResponse(
                 session_id=session_id,
-                client_secret=client_secret,
                 model=session_payload.get("model", deployment),
                 voice=session_payload.get("voice", "alloy"),
                 session_ttl_seconds=SESSION_TTL_SECONDS,
