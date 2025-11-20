@@ -28,3 +28,8 @@ Browser data channel → Azure Realtime TTS → Speakers
 6. **Response payload** – `/chat/{session_id}` returns `ChatResponse` containing the assistant narrative, current agent label, urgency score, and referral completion flag. The frontend renders the message and updates the status indicator.
 7. **Speech synthesis loop** – The frontend pushes the same response text back to Azure Realtime via the data channel (`conversation.item.create` followed by `response.create`). Azure converts it to speech on the existing audio track, so the user hears the answer immediately.
 8. **Session lifecycle** – Optional `GET /chat/{session_id}` exposes current state for debugging, while `DELETE /chat/{session_id}` clears memory. Reconnect logic can request a new `/session` token if the peer connection drops.
+
+## Running 
+
+1. Backend `uvicorn app.main:app --reload`
+2. Frontend `npm run dev`
