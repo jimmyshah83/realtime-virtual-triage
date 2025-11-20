@@ -6,6 +6,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 # Add backend directory to Python path for imports when running as script
 _backend_dir = Path(__file__).parent.parent
@@ -149,10 +150,18 @@ class ChatResponse(BaseModel):
     patient_info: Optional[PatientInfo] = None
 
 
+class ClientSecret(BaseModel):
+    """Ephemeral key payload returned by Azure OpenAI."""
+
+    value: str
+    expires_at: Optional[int] = None
+
+
 class SessionResponse(BaseModel):
     """Response body for Azure Realtime session creation."""
 
     session_id: str
+    client_secret: ClientSecret
     model: str
     voice: str
     session_ttl_seconds: int
@@ -242,17 +251,32 @@ async def create_session() -> SessionResponse:
                 )
 
             session_payload = response.json()
-            session_id = session_payload.get('value', '')
+            client_secret_payload = session_payload.get("client_secret") or {}
+            secret_value = client_secret_payload.get("value") or session_payload.get("value")
+
+            if not secret_value:
+                logger.error("Azure response missing client secret: %s", session_payload)
+                raise HTTPException(status_code=500, detail="Azure response missing client secret")
+
+            session_id = (
+                session_payload.get("session_id")
+                or session_payload.get("id")
+                or session_payload.get("session", {}).get("id")
+            )
 
             if not session_id:
-                logger.error("No session id found in response: %s", session_payload)
-                raise HTTPException(status_code=500, detail="Azure response missing session id")
+                logger.warning("Azure response missing session id, generating fallback id")
+                session_id = str(uuid4())
 
             sessions.setdefault(session_id, _default_session_state())
             _touch_session(session_id)
 
             return SessionResponse(
                 session_id=session_id,
+                client_secret=ClientSecret(
+                    value=secret_value,
+                    expires_at=client_secret_payload.get("expires_at"),
+                ),
                 model=session_payload.get("model", deployment),
                 voice=session_payload.get("voice", "alloy"),
                 session_ttl_seconds=SESSION_TTL_SECONDS,
