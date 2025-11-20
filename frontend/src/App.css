@@ -28,6 +28,110 @@
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
 }
 
+.agent-tracker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  padding: 1.25rem 2rem 0 2rem;
+  background: #fff;
+  margin-bottom: 0.5rem;
+}
+
+.agent-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 1rem;
+  padding: 1rem;
+  background: white;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.agent-card.waiting {
+  opacity: 0.85;
+}
+
+.agent-card.pending {
+  border-style: dashed;
+}
+
+.agent-card.active {
+  border-color: #667eea;
+  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.25);
+}
+
+.agent-card.complete {
+  border-color: #16a34a;
+}
+
+.agent-card-top {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.agent-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  background: #f3f4f6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+}
+
+.agent-text {
+  flex: 1;
+}
+
+.agent-name {
+  margin: 0;
+  font-weight: 600;
+  color: #111827;
+}
+
+.agent-desc {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #6b7280;
+}
+
+.agent-status-pill {
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.agent-status-pill.waiting {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.agent-status-pill.pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.agent-status-pill.active {
+  background: #e0e7ff;
+  color: #4338ca;
+}
+
+.agent-status-pill.complete {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.agent-helper {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #4b5563;
+}
+
 .header-content {
   display: flex;
   align-items: center;
@@ -116,6 +220,27 @@
 
 .triage-summary .red-flags {
   color: #b91c1c;
+}
+
+.medical-codes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+  color: #1f2937;
+}
+
+.handoff-note {
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  background: #e0f2fe;
+  color: #0c4a6e;
+  font-size: 0.85rem;
+}
+
+.handoff-note.success {
+  background: #dcfce7;
+  color: #166534;
 }
 
 .message {

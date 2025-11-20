@@ -1,7 +1,17 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
-type AgentRole = 'intake' | 'clinical-guidance' | 'access' | 'pre-visit' | 'coverage' | 'triage' | 'referral_builder'
+type AgentRole = 'triage' | 'referral_builder'
+type AgentStageStatus = 'waiting' | 'pending' | 'active' | 'complete'
+
+interface TriageSummary {
+  urgency: number
+  redFlags: string[]
+  symptoms: string[]
+  chiefComplaint: string
+  assessment: string
+  medicalCodes: MedicalCodes | null
+}
 
 interface Message {
   id: number
@@ -13,7 +23,7 @@ interface Message {
 
 interface RealtimeEvent {
   type: string
-  [key: string]: any
+  [key: string]: unknown
 }
 
 interface MedicalCodes {
@@ -54,27 +64,32 @@ interface SessionResponsePayload {
 }
 
 function App() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 1,
-      text: "Hello! I'm your virtual health assistant. How can I help you today?",
-      sender: 'bot',
-      timestamp: new Date(),
-      agent: 'intake'
-    }
-  ])
+  const createIntroMessage = (): Message => ({
+    id: 1,
+    text: "Hello! I'm your virtual triage nurse. Tell me what's going on so I can assess your symptoms.",
+    sender: 'bot',
+    timestamp: new Date(),
+    agent: 'triage'
+  })
+
+  const createInitialTriageSummary = (): TriageSummary => ({
+    urgency: 0,
+    redFlags: [],
+    symptoms: [],
+    chiefComplaint: '',
+    assessment: '',
+    medicalCodes: null
+  })
+
+  const [messages, setMessages] = useState<Message[]>([createIntroMessage()])
   const [inputText, setInputText] = useState('')
   const [isRecording, setIsRecording] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
-  const [currentAgent, setCurrentAgent] = useState<AgentRole>('intake')
+  const [currentAgent, setCurrentAgent] = useState<AgentRole>('triage')
   const [sessionId, setSessionId] = useState<string | null>(null)
-  const [triageSummary, setTriageSummary] = useState({
-    urgency: 0,
-    redFlags: [] as string[],
-    symptoms: [] as string[],
-    chiefComplaint: '',
-    assessment: ''
-  })
+  const [triageSummary, setTriageSummary] = useState<TriageSummary>(createInitialTriageSummary())
+  const [handoffReady, setHandoffReady] = useState(false)
+  const [referralComplete, setReferralComplete] = useState(false)
   const [patientInfo, setPatientInfo] = useState<PatientInfo | null>(null)
   const [sessionMeta, setSessionMeta] = useState<{ model: string; voice: string; ttl: number } | null>(null)
 
@@ -125,8 +140,11 @@ function App() {
         redFlags: responseData.red_flags ?? [],
         symptoms: responseData.symptoms ?? [],
         chiefComplaint: responseData.chief_complaint ?? '',
-        assessment: responseData.assessment ?? ''
+        assessment: responseData.assessment ?? '',
+        medicalCodes: responseData.medical_codes ?? null
       })
+      setHandoffReady(Boolean(responseData.handoff_ready))
+      setReferralComplete(Boolean(responseData.referral_complete))
       setPatientInfo(responseData.patient_info ?? null)
 
       setMessages(prev => {
@@ -186,6 +204,15 @@ function App() {
     }
   }, [])
 
+  const resetConversationState = () => {
+    setMessages([createIntroMessage()])
+    setTriageSummary(createInitialTriageSummary())
+    setPatientInfo(null)
+    setHandoffReady(false)
+    setReferralComplete(false)
+    setCurrentAgent('triage')
+  }
+
   const startRealtimeSession = async () => {
     try {
       setIsRecording(true)
@@ -209,6 +236,7 @@ function App() {
         throw new Error('Session response missing credentials')
       }
 
+      resetConversationState()
       setSessionId(newSessionId)
       setSessionMeta({ model: sessionData.model, voice: sessionData.voice, ttl: sessionData.session_ttl_seconds })
       
@@ -266,7 +294,11 @@ function App() {
 
           // You can handle different message types here
           switch (realtimeEvent.type) {
-            case 'conversation.item.input_audio_transcription.completed':
+            case 'conversation.item.input_audio_transcription.completed': {
+              if (typeof realtimeEvent.transcript !== 'string') {
+                break
+              }
+
               const transcript = realtimeEvent.transcript
               console.log('Transcription completed:', transcript)
 
@@ -282,6 +314,7 @@ function App() {
 
               await processWithAgents(transcript)
               break
+            }
             case 'response.done':
               console.log('Response generation completed')
               break
@@ -371,24 +404,63 @@ function App() {
 
   const getAgentLabel = (agent: AgentRole) => {
     switch (agent) {
-      case 'intake':
-        return '👨‍⚕️ Intake Nurse'
-      case 'clinical-guidance':
-        return '🩺 Clinical Specialist'
-      case 'access':
-        return '🏥 Access Coordinator'
-      case 'pre-visit':
-        return '📋 Pre-Visit Assistant'
-      case 'coverage':
-        return '💳 Coverage Specialist'
       case 'triage':
         return '🩺 Triage Nurse'
       case 'referral_builder':
-        return '📨 Referral Builder'
+        return '📨 Referral Coordinator'
       default:
         return '🤖 Assistant'
     }
   }
+
+  const getStageStatus = (agent: AgentRole): AgentStageStatus => {
+    if (agent === 'triage') {
+      if (handoffReady || referralComplete) {
+        return 'complete'
+      }
+      return currentAgent === 'triage' ? 'active' : 'pending'
+    }
+
+    if (referralComplete) {
+      return 'complete'
+    }
+
+    if (!handoffReady) {
+      return 'waiting'
+    }
+
+    return currentAgent === 'referral_builder' ? 'active' : 'pending'
+  }
+
+  const statusLabels: Record<AgentStageStatus, string> = {
+    waiting: 'Waiting',
+    pending: 'Ready',
+    active: 'Active',
+    complete: 'Complete'
+  }
+
+  const agentStages = [
+    {
+      id: 'triage' as AgentRole,
+      title: 'Triage Nurse',
+      icon: '🩺',
+      description: 'Collects symptoms, red flags, and urgency.',
+      helper: handoffReady ? 'Assessment locked in for referral.' : 'Gathering clinical details.',
+      status: getStageStatus('triage')
+    },
+    {
+      id: 'referral_builder' as AgentRole,
+      title: 'Referral Coordinator',
+      icon: '📨',
+      description: 'Builds the referral package for providers.',
+      helper: referralComplete
+        ? 'Referral package ready to share.'
+        : handoffReady
+          ? 'Preparing referral summary now.'
+          : 'Waiting for triage handoff.',
+      status: getStageStatus('referral_builder')
+    }
+  ]
 
   return (
     <div className="chat-container">
@@ -413,6 +485,24 @@ function App() {
           </div>
         </div>
       </div>
+
+          <div className="agent-tracker">
+            {agentStages.map((stage) => (
+              <div key={stage.id} className={`agent-card ${stage.status}`}>
+                <div className="agent-card-top">
+                  <div className="agent-icon" aria-hidden="true">{stage.icon}</div>
+                  <div className="agent-text">
+                    <p className="agent-name">{stage.title}</p>
+                    <p className="agent-desc">{stage.description}</p>
+                  </div>
+                  <span className={`agent-status-pill ${stage.status}`}>
+                    {statusLabels[stage.status]}
+                  </span>
+                </div>
+                <p className="agent-helper">{stage.helper}</p>
+              </div>
+            ))}
+          </div>
 
       {(triageSummary.urgency > 0 || triageSummary.redFlags.length > 0 || triageSummary.symptoms.length > 0) && (
         <div className="triage-summary">
@@ -444,6 +534,28 @@ function App() {
               <strong>Patient:</strong> {[patientInfo.name, patientInfo.age ? `${patientInfo.age}y` : null, patientInfo.gender]
                 .filter(Boolean)
                 .join(' • ')}
+            </div>
+          )}
+          {triageSummary.medicalCodes && (
+            (triageSummary.medicalCodes.snomed_codes?.length || triageSummary.medicalCodes.icd_codes?.length) ? (
+              <div className="medical-codes">
+                {triageSummary.medicalCodes.snomed_codes?.length ? (
+                  <div><strong>SNOMED:</strong> {triageSummary.medicalCodes.snomed_codes.join(', ')}</div>
+                ) : null}
+                {triageSummary.medicalCodes.icd_codes?.length ? (
+                  <div><strong>ICD-10:</strong> {triageSummary.medicalCodes.icd_codes.join(', ')}</div>
+                ) : null}
+              </div>
+            ) : null
+          )}
+          {handoffReady && !referralComplete && (
+            <div className="handoff-note">
+              <strong>Next:</strong> Referral coordinator is preparing your package.
+            </div>
+          )}
+          {referralComplete && (
+            <div className="handoff-note success">
+              <strong>Referral Ready:</strong> Package completed for provider handoff.
             </div>
           )}
         </div>
