@@ -1,12 +1,14 @@
 """Main FastAPI application entry point."""
 
 import json
+import logging
 import os
-from typing import Any, Dict
+import time
+from typing import Any, Dict, Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Response, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
@@ -15,6 +17,8 @@ from .agents import triage_graph, TriageAgentState, PatientInfo, MedicalCodes
 
 # Load environment variables from .env file
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Real-time Virtual Triage",
@@ -31,13 +35,62 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory session storage (use Redis/DB for production)
+# Session management (use Redis/DB for production)
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
 sessions: Dict[str, TriageAgentState] = {}
+session_activity: Dict[str, float] = {}
+
+
+def _default_session_state() -> TriageAgentState:
+    return {
+        "messages": [],
+        "symptoms": [],
+        "patient_info": PatientInfo(),
+        "urgency_score": 0,
+        "red_flags": [],
+        "medical_codes": MedicalCodes(),
+        "referral_package": None,
+        "current_agent": "triage",
+        "handoff_ready": False,
+        "chief_complaint": "",
+        "assessment": "",
+    }
+
+
+def _touch_session(session_id: str) -> None:
+    session_activity[session_id] = time.time()
+
+
+def _purge_expired_sessions() -> None:
+    if not session_activity:
+        return
+    now = time.time()
+    expired = [sid for sid, last_active in session_activity.items() if now - last_active > SESSION_TTL_SECONDS]
+    for sid in expired:
+        sessions.pop(sid, None)
+        session_activity.pop(sid, None)
+        logger.info("Purged inactive session %s", sid)
 
 # Request/Response models
+class PatientInfoUpdate(BaseModel):
+    """Partial patient info update payload."""
+
+    name: Optional[str] = None
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    contact: Optional[str] = None
+    medical_history: Optional[list[str]] = None
+    medications: Optional[list[str]] = None
+    allergies: Optional[list[str]] = None
+
+
 class ChatRequest(BaseModel):
     """Chat request model."""
     message: str
+    transcript_id: Optional[str] = None
+    latency_ms: Optional[int] = None
+    patient_info: Optional[PatientInfoUpdate] = None
+
 
 class ChatResponse(BaseModel):
     """Chat response model."""
@@ -47,6 +100,21 @@ class ChatResponse(BaseModel):
     red_flags: list[str] = []
     handoff_ready: bool = False
     referral_complete: bool = False
+    symptoms: list[str] = []
+    chief_complaint: Optional[str] = None
+    assessment: Optional[str] = None
+    medical_codes: Optional[MedicalCodes] = None
+    patient_info: Optional[PatientInfo] = None
+
+
+class SessionResponse(BaseModel):
+    """Response body for Azure Realtime session creation."""
+
+    session_id: str
+    client_secret: Dict[str, Any]
+    model: str
+    voice: str
+    session_ttl_seconds: int
 
 
 @app.get("/")
@@ -61,8 +129,8 @@ async def health():
     return {"status": "healthy"}
 
 
-@app.post("/session")
-async def create_session() -> Response:
+@app.post("/session", response_model=SessionResponse)
+async def create_session() -> SessionResponse:
     """Generate an ephemeral key for Azure OpenAI Realtime session."""
     try:
         api_key = os.environ["AZURE_OPENAI_API_KEY"]
@@ -86,29 +154,38 @@ async def create_session() -> Response:
             )
 
             if response.status_code != 200:
-                return Response(
-                    content=json.dumps(
-                        {
-                            "error": "Failed to create session",
-                            "details": response.text
-                        }
-                    ),
+                raise HTTPException(
                     status_code=response.status_code,
-                    media_type="application/json"
+                    detail={
+                        "error": "Failed to create session",
+                        "azure_status": response.status_code,
+                        "body": response.text,
+                    },
                 )
 
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                media_type="application/json"
+            session_payload = response.json()
+            session_id = session_payload.get("id")
+            client_secret = session_payload.get("client_secret")
+
+            if not session_id or not client_secret:
+                raise HTTPException(status_code=500, detail="Azure response missing session id or client secret")
+
+            sessions.setdefault(session_id, _default_session_state())
+            _touch_session(session_id)
+
+            return SessionResponse(
+                session_id=session_id,
+                client_secret=client_secret,
+                model=session_payload.get("model", deployment),
+                voice=session_payload.get("voice", "alloy"),
+                session_ttl_seconds=SESSION_TTL_SECONDS,
             )
 
-    except Exception as e:
-        return Response(
-            content=json.dumps({"error": str(e)}),
-            status_code=500,
-            media_type="application/json"
-        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected error creating session")
+        raise HTTPException(status_code=500, detail={"error": str(exc)}) from exc
 
 
 @app.post("/chat/{session_id}")
@@ -122,23 +199,21 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
     Returns:
         ChatResponse with agent response and current state
     """
+    _purge_expired_sessions()
+
     # Initialize or retrieve session state
     if session_id not in sessions:
-        sessions[session_id] = {  
-            "messages": [],
-            "symptoms": [],
-            "patient_info": PatientInfo(),
-            "urgency_score": 0,
-            "red_flags": [],
-            "medical_codes": MedicalCodes(),
-            "referral_package": None,
-            "current_agent": "triage",
-            "handoff_ready": False,
-            "chief_complaint": "",
-            "assessment": ""
-        }
-    
+        logger.info("Initializing new session state for %s", session_id)
+        sessions[session_id] = _default_session_state()
+
     state = sessions[session_id]
+    _touch_session(session_id)
+
+    # Merge patient info updates if provided
+    if chat_request.patient_info:
+        existing_info = state.get("patient_info", PatientInfo())
+        updates = chat_request.patient_info.model_dump(exclude_none=True)
+        state["patient_info"] = existing_info.model_copy(update=updates)
     
     # Add user message to conversation history
     state["messages"].append(HumanMessage(content=chat_request.message))
@@ -190,7 +265,12 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
             urgency=result.get("urgency_score", 0),
             red_flags=result.get("red_flags", []),
             handoff_ready=result.get("handoff_ready", False),
-            referral_complete=result.get("referral_package") is not None
+            referral_complete=result.get("referral_package") is not None,
+            symptoms=result.get("symptoms", []),
+            chief_complaint=result.get("chief_complaint"),
+            assessment=result.get("assessment"),
+            medical_codes=result.get("medical_codes"),
+            patient_info=result.get("patient_info"),
         )
         
     except Exception as e:
@@ -202,6 +282,7 @@ async def delete_session(session_id: str):
     """Delete a chat session."""
     if session_id in sessions:
         del sessions[session_id]
+        session_activity.pop(session_id, None)
         return {"message": "Session deleted"}
     raise HTTPException(status_code=404, detail="Session not found")
 
@@ -220,5 +301,8 @@ async def get_session(session_id: str):
         "symptoms": state.get("symptoms", []),
         "red_flags": state.get("red_flags", []),
         "handoff_ready": state.get("handoff_ready", False),
-        "referral_complete": state.get("referral_package") is not None
+        "referral_complete": state.get("referral_package") is not None,
+        "patient_info": state.get("patient_info"),
+        "medical_codes": state.get("medical_codes"),
+        "last_active": session_activity.get(session_id),
     }
