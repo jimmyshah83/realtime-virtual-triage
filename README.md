@@ -2,44 +2,29 @@
 
 A multi-agent orchestration platform helping patients get triaged virtually using LangGraph, GPT Realtime, and GPT-5.
 
-## Features
+## Architecture Overview
 
-Virtual Front Door & Nurse Triage (primary/urgent care access & navigation)
-What it is
-A multi‑agent intake system that triages symptoms, stratifies risk, navigates to the right level of care (PCP, virtual visit, community clinic, ED when necessary), and completes pre‑visit steps (forms, labs, imaging). It integrates with eReferral/eConsult and provincial resources where available.
-Multi‑agent design (example roles)
+- **Browser client (`frontend/src/App.tsx`)** captures microphone audio, maintains a chat transcript UI, and manages a `RTCPeerConnection` plus data channel to Azure Realtime. It also calls FastAPI REST endpoints to keep LangGraph state authoritative.
+- **Azure Realtime API (WebRTC + Whisper + TTS)** receives the browser audio stream, performs built-in transcription, emits transcript events over the data channel, and plays synthesized speech when the frontend sends assistant text back.
+- **FastAPI backend (`backend/app/main.py`)** exposes `/session` to mint Azure ephemeral keys and `/chat/{session_id}` to run the LangGraph workflow. It stores a `TriageAgentState` per session in memory for the proof of concept.
+- **LangGraph agents (`backend/app/agents.py`)** host the triage nurse agent and referral builder agent, using `AzureChatOpenAI` structured outputs to keep assessments, red flags, medical codes, and referral packages consistent.
+- **Session store** is currently an in-memory dictionary for rapid iteration; swap with Redis or Postgres when you need durability or horizontal scale.
 
-Intake Agent: converses (voice/chat) with patients, captures symptoms, history, meds; writes a structured triage note.
-Clinical Guideline Agent: applies evidence‑based pathways, checks red flags, and proposes a safe disposition; hands off to a human nurse when confidence is low.
-Access & Wait‑time Agent: finds the best available care setting (same‑day/next‑day), factoring distance and opening hours; books the slot.
-Pre‑Visit Orchestration Agent: orders labs/imaging per pathway, obtains consent, and shares preparation instructions.
-Benefits & Coverage Agent: validates eligibility/coverage (public/private), avoids surprise costs, and routes prior‑auth when applicable.
-
-Why multi‑agent?
-Triage + navigation + booking + pre‑visit orchestration are distinct competencies. Coordinated agents shorten access time and lower inappropriate ED use, while maintaining human‑in‑the‑loop for safety. (Agent differences and autonomy patterns summarized in your decks agentic_ai and ctc_agentic_agents.) [agentic_ai | PDF], [ctc_agentic_agents | PowerPoint]
-Patient‑care impact (Canadian context)
-
-Faster access, safer triage: appropriate level‑of‑care routing reduces delays and clinical risk; fewer low‑acuity ED visits.
-Better preparedness: pre‑visit labs and forms reduce repeat visits and diagnostic delays.
-Equity: multilingual intake improves access for newcomers and linguistically diverse communities common across Ontario/Canada.
-Trust & compliance: triage notes, decisions, and handoffs are auditable (PHIPA/PIPEDA), with clear escalation rules to licensed clinicians. 
-
-## Flow
-
+```text
+Mic → Browser WebRTC → Azure Realtime (Whisper STT)
+                               ↓ transcripts via data channel
+                      FastAPI `/chat/{session}` → LangGraph triage/referral
+                               ↓ response text
+Browser data channel → Azure Realtime TTS → Speakers
 ```
-User speaks → WebRTC → Azure Realtime API → Transcription (built-in Whisper)
-                                          ↓
-                          Realtime API sends transcription event
-                                          ↓
-                          Frontend receives transcription text
-                                          ↓
-                          Send text to LangGraph backend
-                                          ↓
-                          LangGraph agent processes
-                                          ↓
-                          Send agent response back to Realtime API
-                                          ↓
-                          Realtime API converts to speech (TTS)
-                                          ↓
-                          User hears response
-```
+
+## Detailed Flow
+
+1. **Session bootstrap** – The frontend requests `POST /session`. FastAPI proxies to Azure using `AZURE_OPENAI_*` credentials and returns the ephemeral key and session id that the browser will use for the SDP exchange.
+2. **WebRTC connection** – `startRealtimeSession` in `frontend/src/App.tsx` creates a peer connection, adds the mic track, opens the `realtime-channel` data channel, and exchanges SDP with `https://{region}.realtimeapi-preview.ai.azure.com/v1/realtimertc`.
+3. **Turn detection + transcription** – Azure Whisper performs speech-to-text and pushes `conversation.item.input_audio_transcription.completed` events on the data channel. The frontend appends each transcript to the chat history for transparency.
+4. **Backend orchestration call** – For every finalized transcript, `processWithAgents` POSTs `/chat/{session_id}`. FastAPI records the utterance as a `HumanMessage`, retrieves the session state, and invokes `triage_graph`.
+5. **Agent reasoning** – Inside `triage_graph`, the triage agent updates symptoms, urgency, and red flags. When `handoff_ready` becomes true, the referral builder agent compiles the referral package, all using `AzureChatOpenAI` structured outputs defined in `backend/app/agents.py`.
+6. **Response payload** – `/chat/{session_id}` returns `ChatResponse` containing the assistant narrative, current agent label, urgency score, and referral completion flag. The frontend renders the message and updates the status indicator.
+7. **Speech synthesis loop** – The frontend pushes the same response text back to Azure Realtime via the data channel (`conversation.item.create` followed by `response.create`). Azure converts it to speech on the existing audio track, so the user hears the answer immediately.
+8. **Session lifecycle** – Optional `GET /chat/{session_id}` exposes current state for debugging, while `DELETE /chat/{session_id}` clears memory. Reconnect logic can request a new `/session` token if the peer connection drops.
