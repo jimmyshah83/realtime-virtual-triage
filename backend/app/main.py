@@ -134,13 +134,12 @@ async def create_session() -> SessionResponse:
     """Generate an ephemeral key for Azure OpenAI Realtime session."""
     try:
         api_key = os.environ["AZURE_OPENAI_API_KEY"]
-        api_version = os.environ["AZURE_OPENAI_API_VERSION"]
         deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
         voice = os.getenv("AZURE_OPENAI_REALTIME_VOICE", "alloy") or "alloy"
         session_type = os.getenv("AZURE_OPENAI_SESSION_TYPE", "realtime") or "realtime"
         session_instructions = os.getenv("AZURE_OPENAI_SESSION_INSTRUCTIONS", "You are a helpful assistant.")
 
-        session_url = f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/realtime/client_secrets?api-version={api_version}"
+        session_url = f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1/realtime/client_secrets"
         logger.info("Creating Azure Realtime session at %s", session_url)
         logger.debug("Realtime session payload: model=%s voice=%s session_type=%s", deployment, voice, session_type)
 
