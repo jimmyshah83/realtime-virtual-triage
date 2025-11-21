@@ -1,6 +1,7 @@
 """Langgraph Orchestration Agents Implementation."""
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional, Literal
@@ -18,6 +19,7 @@ from dotenv import load_dotenv
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(_BACKEND_ROOT / ".env", override=False)
 
+logger = logging.getLogger(__name__)
 
 def _get_required_env(name: str) -> str:
     """Return a required environment variable or raise a helpful error message."""
@@ -77,6 +79,10 @@ class TriageAgentOutput(BaseModel):
     assessment: str = Field(description="Clinical assessment summary")
     medical_codes: MedicalCodes = Field(description="SNOMED and ICD codes")
     handoff_ready: bool = Field(description="Whether sufficient info collected for referral")
+    clarifying_question: Optional[str] = Field(
+        default=None,
+        description="Next question to ask the patient when more info is required",
+    )
 
 
 class ClinicalGuidanceOutput(BaseModel):
@@ -131,6 +137,8 @@ class TriageAgentState(TypedDict, total=False):
     guidance_summary: str
     next_steps: list[str]
     selected_physician: Optional[PhysicianInfo]
+    clarifying_question: Optional[str]
+    clarification_attempts: int
 
 def _build_azure_model() -> AzureChatOpenAI:
     """Construct the Azure OpenAI client with validated configuration."""
@@ -203,6 +211,9 @@ def _select_physician(urgency_score: int, recommended_setting: str) -> Optional[
 # Agent Node Functions
 def triage_agent(state: TriageAgentState) -> TriageAgentState:
     """Triage agent that assesses symptoms and assigns urgency."""
+    
+    logger.debug("Starting triage agent with state: %s", state)
+
     structured_llm = model.with_structured_output(TriageAgentOutput)
     conversation_history = "\n".join([
         f"{msg.type}: {msg.content}" for msg in state.get("messages", [])
@@ -228,16 +239,32 @@ If insufficient information, set handoff_ready to false and indicate what inform
     state["handoff_ready"] = result.handoff_ready
     state["chief_complaint"] = result.chief_complaint
     state["assessment"] = result.assessment
+    state["clarifying_question"] = result.clarifying_question
     state["current_agent"] = "triage"
+
+    previous_attempts = state.get("clarification_attempts", 0) or 0
+    if result.handoff_ready or not result.clarifying_question:
+        state["clarification_attempts"] = 0
+    else:
+        if previous_attempts >= 2:
+            state["handoff_ready"] = True
+            state["clarifying_question"] = None
+            state["clarification_attempts"] = 0
+        else:
+            state["clarification_attempts"] = previous_attempts + 1
     
     print(f"\n[TRIAGE AGENT] Urgency: {result.urgency_score}, Red Flags: {result.red_flags}")
     print(f"[TRIAGE AGENT] Handoff Ready: {result.handoff_ready}")
     
+    logger.debug("Completed triage agent with updated state: %s", state)
+
     return state
 
 
 def clinical_guidance_agent(state: TriageAgentState) -> TriageAgentState:
     """Agent that determines referral necessity and next steps."""
+
+    logger.debug("Starting clinical guidance agent with state: %s", state)
 
     structured_llm = model.with_structured_output(ClinicalGuidanceOutput)
     prompt = f"""{CLINICAL_GUIDANCE_SYSTEM_PROMPT}
@@ -269,11 +296,15 @@ Provide your determination now."""
         f"Setting: {result.recommended_setting}"
     )
 
+    logger.debug("Completed clinical guidance agent with updated state: %s", state)
+
     return state
 
 
 def referral_builder_agent(state: TriageAgentState) -> TriageAgentState:
     """Referral builder agent that creates comprehensive referral package."""
+
+    logger.debug("Starting referral builder agent with state: %s", state)
     if not state.get("referral_required"):
         return state
 
@@ -313,6 +344,7 @@ Create a complete referral package with all necessary information for the receiv
     if selected_physician:
         print(f"[REFERRAL BUILDER] Physician: {selected_physician.name} ({selected_physician.specialty})")
     
+    logger.debug("Completed referral builder agent with updated state: %s", state)
     return state
 
 
@@ -321,7 +353,10 @@ def _route_after_triage(state: TriageAgentState) -> Literal["clinical_guidance",
     """Proceed to clinical guidance only when triage captured enough info."""
 
     handoff_ready = state.get("handoff_ready", False)
-    if handoff_ready:
+    red_flags = state.get("red_flags", []) or []
+    urgency = state.get("urgency_score", 0) or 0
+
+    if handoff_ready or red_flags or urgency >= 4:
         return "clinical_guidance"
     return "end"
 

@@ -79,6 +79,8 @@ def _default_session_state() -> TriageAgentState:
         "guidance_summary": "",
         "next_steps": [],
         "selected_physician": None,
+        "clarifying_question": "",
+        "clarification_attempts": 0,
     }
 
 
@@ -164,6 +166,7 @@ class ChatResponse(BaseModel):
     guidance_summary: Optional[str] = None
     next_steps: list[str] = []
     physician: Optional[PhysicianInfo] = None
+    clarifying_question: Optional[str] = None
 
 
 class ClientSecret(BaseModel):
@@ -346,10 +349,13 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
         current_agent = result.get("current_agent", "triage")
         
         referral_required = result.get("referral_required", False)
+        clarifying_question = result.get("clarifying_question")
         if current_agent == "triage":
-            response_text = "I'm still gathering details to understand your symptoms fully."
-            if result.get("symptoms"):
-                response_text += f" So far you've mentioned: {', '.join(result['symptoms'])}."
+            if result.get("handoff_ready"):
+                response_text = "Thanks for the detailed information. I'm locking in your assessment and moving it to our clinical guidance specialist."
+            else:
+                question = clarifying_question or "Can you tell me a bit more about your symptoms?"
+                response_text = f"I want to understand your situation clearly. {question}"
         elif current_agent == "clinical_guidance":
             summary = result.get("guidance_summary") or "Here's what I recommend."
             response_text = f"🩺 Clinical Guidance\n\n{summary}\n"
@@ -415,6 +421,7 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
             guidance_summary=result.get("guidance_summary"),
             next_steps=result.get("next_steps", []),
             physician=result.get("selected_physician"),
+            clarifying_question=clarifying_question,
         )
         
     except Exception as e:

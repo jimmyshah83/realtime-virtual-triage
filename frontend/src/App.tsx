@@ -1,6 +1,24 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
+const PASS_THROUGH_REALTIME_EVENTS = new Set<string>([
+  'input_audio_buffer.speech_started',
+  'input_audio_buffer.speech_stopped',
+  'input_audio_buffer.committed',
+  'response.created',
+  'response.output_item.added',
+  'response.output_item.done',
+  'response.content_part.added',
+  'response.content_part.done',
+  'response.output_audio_transcript.delta',
+  'response.output_audio_transcript.done',
+  'response.output_audio.done',
+  'output_audio_buffer.started',
+  'output_audio_buffer.stopped',
+  'conversation.item.added',
+  'conversation.item.done',
+])
+
 type AgentRole = 'triage' | 'clinical_guidance' | 'referral_builder'
 type AgentStageStatus = 'waiting' | 'pending' | 'active' | 'complete'
 
@@ -77,6 +95,7 @@ interface ChatResponsePayload {
   guidance_summary?: string | null
   next_steps?: string[]
   physician?: PhysicianInfo | null
+  clarifying_question?: string | null
 }
 
 interface SessionResponsePayload {
@@ -128,6 +147,32 @@ function App() {
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
 
+  const extractTranscriptText = (event: RealtimeEvent): string | null => {
+    if (!event) {
+      return null
+    }
+
+    const directTranscript = (event as { transcript?: unknown }).transcript
+    if (typeof directTranscript === 'string' && directTranscript.trim()) {
+      return directTranscript.trim()
+    }
+
+    const content = (event as { content?: unknown }).content as { text?: unknown } | undefined
+    if (content && typeof content.text === 'string' && content.text.trim()) {
+      return content.text.trim()
+    }
+
+    const item = (event as { item?: unknown }).item as { content?: Array<{ text?: unknown }> } | undefined
+    if (item && Array.isArray(item.content)) {
+      const textPart = item.content.find((part) => typeof part?.text === 'string')
+      if (textPart && typeof textPart.text === 'string' && textPart.text.trim()) {
+        return textPart.text.trim()
+      }
+    }
+
+    return null
+  }
+
   const handleSendMessage = async () => {
     if (inputText.trim()) {
       setMessages(prev => {
@@ -150,6 +195,11 @@ function App() {
   }
 
   const processWithAgents = async (userInput: string) => {
+    if (!sessionId) {
+      console.warn('Realtime transcript ignored because session is not ready yet')
+      return
+    }
+
     try {
       const sessionResponse = await fetch(`http://localhost:8000/chat/${sessionId}`, {
         method: 'POST',
@@ -309,11 +359,15 @@ function App() {
       const sessionUpdate: RealtimeEvent = {
         type: 'session.update',
         session: {
+          // Azure requires the session type to be provided explicitly
+          type: 'realtime',
           turn_detection: {
             type: 'server_vad',
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 500
+            silence_duration_ms: 500,
+            create_response: false,
+            interrupt_response: true,
           }, 
           input_audio_transcription: {
             model: 'whisper-1', 
@@ -333,12 +387,17 @@ function App() {
 
           // You can handle different message types here
           switch (realtimeEvent.type) {
+            case 'session.created':
+              console.log('Realtime API session is ready')
+              break
+
             case 'conversation.item.input_audio_transcription.completed': {
-              if (typeof realtimeEvent.transcript !== 'string') {
+              const transcript = extractTranscriptText(realtimeEvent)
+              if (!transcript) {
+                console.warn('Transcription event missing text payload', realtimeEvent)
                 break
               }
 
-              const transcript = realtimeEvent.transcript
               console.log('Transcription completed:', transcript)
 
               setMessages(prev => {
@@ -354,6 +413,11 @@ function App() {
               await processWithAgents(transcript)
               break
             }
+
+            case 'conversation.item.input_audio_transcription.failed':
+              console.error('Transcription failed:', realtimeEvent)
+              break
+
             case 'response.done':
               console.log('Response generation completed')
               break
@@ -362,8 +426,14 @@ function App() {
               console.error('Error during response generation:', realtimeEvent.error)
               break
 
+            case 'error':
+              console.error('Realtime API error:', realtimeEvent.error ?? realtimeEvent)
+              break
+
             default:
-              console.log('Unhandled event type:', realtimeEvent.type)
+              if (!PASS_THROUGH_REALTIME_EVENTS.has(realtimeEvent.type)) {
+                console.log('Unhandled event type:', realtimeEvent.type)
+              }
               break
             }
           }
