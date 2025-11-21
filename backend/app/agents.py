@@ -212,7 +212,7 @@ def _select_physician(urgency_score: int, recommended_setting: str) -> Optional[
 def triage_agent(state: TriageAgentState) -> TriageAgentState:
     """Triage agent that assesses symptoms and assigns urgency."""
     
-    logger.debug("Starting triage agent with state: %s", state)
+    logger.info("Starting triage agent with state: %s", state)
 
     structured_llm = model.with_structured_output(TriageAgentOutput)
     conversation_history = "\n".join([
@@ -256,7 +256,7 @@ If insufficient information, set handoff_ready to false and indicate what inform
     print(f"\n[TRIAGE AGENT] Urgency: {result.urgency_score}, Red Flags: {result.red_flags}")
     print(f"[TRIAGE AGENT] Handoff Ready: {result.handoff_ready}")
     
-    logger.debug("Completed triage agent with updated state: %s", state)
+    logger.info("Completed triage agent with updated state: %s", state)
 
     return state
 
@@ -264,7 +264,7 @@ If insufficient information, set handoff_ready to false and indicate what inform
 def clinical_guidance_agent(state: TriageAgentState) -> TriageAgentState:
     """Agent that determines referral necessity and next steps."""
 
-    logger.debug("Starting clinical guidance agent with state: %s", state)
+    logger.info("Starting clinical guidance agent with state: %s", state)
 
     structured_llm = model.with_structured_output(ClinicalGuidanceOutput)
     prompt = f"""{CLINICAL_GUIDANCE_SYSTEM_PROMPT}
@@ -296,7 +296,7 @@ Provide your determination now."""
         f"Setting: {result.recommended_setting}"
     )
 
-    logger.debug("Completed clinical guidance agent with updated state: %s", state)
+    logger.info("Completed clinical guidance agent with updated state: %s", state)
 
     return state
 
@@ -304,7 +304,7 @@ Provide your determination now."""
 def referral_builder_agent(state: TriageAgentState) -> TriageAgentState:
     """Referral builder agent that creates comprehensive referral package."""
 
-    logger.debug("Starting referral builder agent with state: %s", state)
+    logger.info("Starting referral builder agent with state: %s", state)
     if not state.get("referral_required"):
         return state
 
@@ -344,7 +344,7 @@ Create a complete referral package with all necessary information for the receiv
     if selected_physician:
         print(f"[REFERRAL BUILDER] Physician: {selected_physician.name} ({selected_physician.specialty})")
     
-    logger.debug("Completed referral builder agent with updated state: %s", state)
+    logger.info("Completed referral builder agent with updated state: %s", state)
     return state
 
 

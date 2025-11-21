@@ -361,16 +361,20 @@ function App() {
         session: {
           // Azure requires the session type to be provided explicitly
           type: 'realtime',
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 500,
-            create_response: false,
-            interrupt_response: true,
-          }, 
-          input_audio_transcription: {
-            model: 'whisper-1', 
+          audio: {
+            input: {
+              turn_detection: {
+                type: 'server_vad',
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 500,
+                create_response: false,
+                interrupt_response: true,
+              },
+              transcription: {
+                model: 'whisper-1',
+              },
+            },
           },
         }
       }
@@ -391,7 +395,8 @@ function App() {
               console.log('Realtime API session is ready')
               break
 
-            case 'conversation.item.input_audio_transcription.completed': {
+            case 'conversation.item.input_audio_transcription.completed':
+            case 'conversation.item.audio_transcription.completed': {
               const transcript = extractTranscriptText(realtimeEvent)
               if (!transcript) {
                 console.warn('Transcription event missing text payload', realtimeEvent)
@@ -415,6 +420,7 @@ function App() {
             }
 
             case 'conversation.item.input_audio_transcription.failed':
+            case 'conversation.item.audio_transcription.failed':
               console.error('Transcription failed:', realtimeEvent)
               break
 
