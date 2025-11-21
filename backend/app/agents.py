@@ -10,9 +10,9 @@ from app.utils.referral_builder import REFERRAL_BUILDER_SYSTEM_PROMPT
 from app.utils.clinical_guidance import CLINICAL_GUIDANCE_SYSTEM_PROMPT
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
-from langchain_openai import AzureChatOpenAI
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage
-from pydantic import SecretStr, BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
 
@@ -140,13 +140,16 @@ class TriageAgentState(TypedDict, total=False):
     clarifying_question: Optional[str]
     clarification_attempts: int
 
-def _build_azure_model() -> AzureChatOpenAI:
-    """Construct the Azure OpenAI client with validated configuration."""
-    return AzureChatOpenAI(
-        azure_endpoint=_get_required_env("AZURE_OPENAI_ENDPOINT"),
-        azure_deployment=_get_required_env("AZURE_OPENAI_DEPLOYMENT_NAME"),
-        api_version=_get_required_env("AZURE_OPENAI_API_VERSION"),
-        azure_ad_token=SecretStr(_get_required_env("AZURE_OPENAI_API_KEY")),
+def _build_azure_model() -> ChatOpenAI:
+    """Construct the Azure OpenAI client pointed at the v1 endpoint."""
+    endpoint = _get_required_env("AZURE_OPENAI_ENDPOINT").rstrip("/")
+    base_url = f"{endpoint}/openai/v1"
+    model_name = os.getenv("AZURE_OPENAI_AGENT_MODEL", "gpt-5")
+
+    return ChatOpenAI(
+        model=model_name,
+        base_url=base_url,
+        api_key=SecretStr(_get_required_env("AZURE_OPENAI_API_KEY")),
         temperature=0,
     )
 

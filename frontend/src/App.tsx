@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
 const PASS_THROUGH_REALTIME_EVENTS = new Set<string>([
+  'session.updated',
   'input_audio_buffer.speech_started',
   'input_audio_buffer.speech_stopped',
   'input_audio_buffer.committed',
@@ -146,6 +147,11 @@ function App() {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const dataChannelRef = useRef<RTCDataChannel | null>(null)
+  const sessionIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId
+  }, [sessionId])
 
   const extractTranscriptText = (event: RealtimeEvent): string | null => {
     if (!event) {
@@ -188,20 +194,21 @@ function App() {
       const messageText = inputText
       setInputText('')
       
-      if (sessionId) {
+      if (sessionIdRef.current) {
         await processWithAgents(messageText)
       }
     }
   }
 
   const processWithAgents = async (userInput: string) => {
-    if (!sessionId) {
+    const activeSessionId = sessionIdRef.current
+    if (!activeSessionId) {
       console.warn('Realtime transcript ignored because session is not ready yet')
       return
     }
 
     try {
-      const sessionResponse = await fetch(`http://localhost:8000/chat/${sessionId}`, {
+      const sessionResponse = await fetch(`http://localhost:8000/chat/${activeSessionId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -327,6 +334,7 @@ function App() {
 
       resetConversationState()
       setSessionId(newSessionId)
+      sessionIdRef.current = newSessionId
       setSessionMeta({ model: sessionData.model, voice: sessionData.voice, ttl: sessionData.session_ttl_seconds })
       
       // Create a peer connection
@@ -506,6 +514,8 @@ function App() {
     }
     setIsRecording(false)
     setIsConnected(false)
+    setSessionId(null)
+    sessionIdRef.current = null
     console.log('Realtime session stopped')
   }
 
