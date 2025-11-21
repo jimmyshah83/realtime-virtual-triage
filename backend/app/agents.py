@@ -20,6 +20,7 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(_BACKEND_ROOT / ".env", override=False)
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 def _get_required_env(name: str) -> str:
     """Return a required environment variable or raise a helpful error message."""

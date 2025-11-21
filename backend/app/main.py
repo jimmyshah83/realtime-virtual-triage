@@ -34,6 +34,7 @@ if str(_backend_dir) not in sys.path:
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 app = FastAPI(
     title="Real-time Virtual Triage",
@@ -319,12 +320,6 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
     Returns:
         ChatResponse with agent response and current state
     """
-    logger.info(
-        "Chat request received | session=%s | text=%s",
-        session_id,
-        chat_request.message.strip()[:200] if chat_request.message else "",
-    )
-
     _purge_expired_sessions()
 
     # Initialize or retrieve session state
@@ -431,7 +426,6 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
         )
         
     except Exception as e:
-        logger.exception("Chat processing failed for session %s", session_id)
         raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}") from e
 
 
