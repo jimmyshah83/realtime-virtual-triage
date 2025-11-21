@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
 
-type AgentRole = 'triage' | 'referral_builder'
+type AgentRole = 'triage' | 'clinical_guidance' | 'referral_builder'
 type AgentStageStatus = 'waiting' | 'pending' | 'active' | 'complete'
 
 interface TriageSummary {
@@ -41,6 +41,25 @@ interface PatientInfo {
   allergies?: string[]
 }
 
+interface PhysicianInfo {
+  id: string
+  name: string
+  specialty: string
+  location: string
+  urgency_min: number
+  urgency_max: number
+  contact_phone?: string | null
+  contact_email?: string | null
+}
+
+interface GuidanceDetails {
+  summary: string
+  recommendedSetting: string
+  nextSteps: string[]
+  referralRequired: boolean
+  physician: PhysicianInfo | null
+}
+
 interface ChatResponsePayload {
   current_agent: AgentRole
   response: string
@@ -48,11 +67,16 @@ interface ChatResponsePayload {
   red_flags: string[]
   handoff_ready: boolean
   referral_complete: boolean
+  referral_required: boolean
   symptoms: string[]
   chief_complaint?: string | null
   assessment?: string | null
   medical_codes?: MedicalCodes | null
   patient_info?: PatientInfo | null
+  recommended_setting?: string | null
+  guidance_summary?: string | null
+  next_steps?: string[]
+  physician?: PhysicianInfo | null
 }
 
 interface SessionResponsePayload {
@@ -90,6 +114,13 @@ function App() {
   const [triageSummary, setTriageSummary] = useState<TriageSummary>(createInitialTriageSummary())
   const [handoffReady, setHandoffReady] = useState(false)
   const [referralComplete, setReferralComplete] = useState(false)
+  const [guidanceDetails, setGuidanceDetails] = useState<GuidanceDetails>({
+    summary: '',
+    recommendedSetting: '',
+    nextSteps: [],
+    referralRequired: false,
+    physician: null
+  })
   const [patientInfo, setPatientInfo] = useState<PatientInfo | null>(null)
   const [sessionMeta, setSessionMeta] = useState<{ model: string; voice: string; ttl: number } | null>(null)
 
@@ -145,6 +176,13 @@ function App() {
       })
       setHandoffReady(Boolean(responseData.handoff_ready))
       setReferralComplete(Boolean(responseData.referral_complete))
+      setGuidanceDetails({
+        summary: responseData.guidance_summary ?? '',
+        recommendedSetting: responseData.recommended_setting ?? '',
+        nextSteps: responseData.next_steps ?? [],
+        referralRequired: Boolean(responseData.referral_required),
+        physician: responseData.physician ?? null
+      })
       setPatientInfo(responseData.patient_info ?? null)
 
       setMessages(prev => {
@@ -210,6 +248,7 @@ function App() {
     setPatientInfo(null)
     setHandoffReady(false)
     setReferralComplete(false)
+    setGuidanceDetails({ summary: '', recommendedSetting: '', nextSteps: [], referralRequired: false, physician: null })
     setCurrentAgent('triage')
   }
 
@@ -406,6 +445,8 @@ function App() {
     switch (agent) {
       case 'triage':
         return '🩺 Triage Nurse'
+      case 'clinical_guidance':
+        return '🧭 Clinical Guidance'
       case 'referral_builder':
         return '📨 Referral Coordinator'
       default:
@@ -420,15 +461,26 @@ function App() {
       }
       return currentAgent === 'triage' ? 'active' : 'pending'
     }
-
-    if (referralComplete) {
+    if (agent === 'clinical_guidance') {
+      if (!handoffReady) {
+        return 'waiting'
+      }
+      if (!guidanceDetails.summary) {
+        return currentAgent === 'clinical_guidance' ? 'active' : 'pending'
+      }
       return 'complete'
     }
 
-    if (!handoffReady) {
+    // referral builder
+    if (!guidanceDetails.referralRequired) {
+      return guidanceDetails.summary ? 'complete' : 'waiting'
+    }
+    if (referralComplete) {
+      return 'complete'
+    }
+    if (!guidanceDetails.summary) {
       return 'waiting'
     }
-
     return currentAgent === 'referral_builder' ? 'active' : 'pending'
   }
 
@@ -449,15 +501,33 @@ function App() {
       status: getStageStatus('triage')
     },
     {
+      id: 'clinical_guidance' as AgentRole,
+      title: 'Clinical Guidance',
+      icon: '🧭',
+      description: 'Determines care setting and next steps.',
+      helper: !handoffReady
+        ? 'Waiting for triage findings.'
+        : guidanceDetails.summary
+          ? guidanceDetails.referralRequired
+            ? 'Referral recommended; sharing provider soon.'
+            : 'No referral needed—sharing next steps.'
+          : currentAgent === 'clinical_guidance'
+            ? 'Evaluating urgency and referral need...'
+            : 'Preparing guidance summary.',
+      status: getStageStatus('clinical_guidance')
+    },
+    {
       id: 'referral_builder' as AgentRole,
       title: 'Referral Coordinator',
       icon: '📨',
       description: 'Builds the referral package for providers.',
-      helper: referralComplete
-        ? 'Referral package ready to share.'
-        : handoffReady
-          ? 'Preparing referral summary now.'
-          : 'Waiting for triage handoff.',
+      helper: !guidanceDetails.referralRequired
+        ? 'Referral not required for this case.'
+        : referralComplete
+          ? 'Referral package ready to share.'
+          : guidanceDetails.summary
+            ? 'Preparing referral summary now.'
+            : 'Waiting for guidance decision.',
       status: getStageStatus('referral_builder')
     }
   ]
@@ -556,6 +626,42 @@ function App() {
           {referralComplete && (
             <div className="handoff-note success">
               <strong>Referral Ready:</strong> Package completed for provider handoff.
+            </div>
+          )}
+        </div>
+      )}
+
+      {(guidanceDetails.summary || guidanceDetails.physician) && (
+        <div className="guidance-summary-card">
+          <div>
+            <strong>Recommended Setting:</strong> {guidanceDetails.recommendedSetting || 'Determining'}
+          </div>
+          {guidanceDetails.summary && (
+            <div>
+              <strong>Guidance:</strong> {guidanceDetails.summary}
+            </div>
+          )}
+          {guidanceDetails.nextSteps.length > 0 && (
+            <div className="next-steps">
+              <strong>Next Steps:</strong>
+              <ul>
+                {guidanceDetails.nextSteps.map((step, index) => (
+                  <li key={`step-${index}`}>{step}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {guidanceDetails.physician && (
+            <div className="physician-card">
+              <div className="physician-header">Assigned Physician</div>
+              <div className="physician-name">{guidanceDetails.physician.name}</div>
+              <div className="physician-detail">{guidanceDetails.physician.specialty} • {guidanceDetails.physician.location}</div>
+              {guidanceDetails.physician.contact_phone && (
+                <div className="physician-detail">Phone: {guidanceDetails.physician.contact_phone}</div>
+              )}
+              {guidanceDetails.physician.contact_email && (
+                <div className="physician-detail">Email: {guidanceDetails.physician.contact_email}</div>
+              )}
             </div>
           )}
         </div>

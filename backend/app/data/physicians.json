@@ -1,0 +1,42 @@
+[
+  {
+    "id": "pc-001",
+    "name": "Dr. Amina Patel",
+    "specialty": "Primary Care",
+    "location": "Seattle, WA",
+    "urgency_min": 1,
+    "urgency_max": 2,
+    "contact_phone": "206-555-0148",
+    "contact_email": "apatel@evergreenhealth.com"
+  },
+  {
+    "id": "uc-101",
+    "name": "Dr. Leo Ramirez",
+    "specialty": "Urgent Care",
+    "location": "Bellevue, WA",
+    "urgency_min": 2,
+    "urgency_max": 3,
+    "contact_phone": "425-555-2290",
+    "contact_email": "lramirez@lakesideuc.com"
+  },
+  {
+    "id": "ed-501",
+    "name": "Dr. Priya Desai",
+    "specialty": "Emergency Medicine",
+    "location": "Seattle, WA",
+    "urgency_min": 4,
+    "urgency_max": 5,
+    "contact_phone": "206-555-9102",
+    "contact_email": "pdesai@harborviewed.org"
+  },
+  {
+    "id": "card-220",
+    "name": "Dr. Marcus Lee",
+    "specialty": "Cardiology",
+    "location": "Redmond, WA",
+    "urgency_min": 3,
+    "urgency_max": 5,
+    "contact_phone": "425-555-7711",
+    "contact_email": "mlee@cascadecardio.com"
+  }
+]

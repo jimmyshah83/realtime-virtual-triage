@@ -7,14 +7,17 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
+import threading
 
-# Add backend directory to Python path for imports when running as script
-_backend_dir = Path(__file__).parent.parent
-if str(_backend_dir) not in sys.path:
-    sys.path.insert(0, str(_backend_dir))
+from app.agents import (
+    triage_graph,
+    TriageAgentState,
+    PatientInfo,
+    MedicalCodes,
+    PhysicianInfo,
+)
 
 import httpx
-import threading
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -22,7 +25,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, AIMessage
 
-from app.agents import triage_graph, TriageAgentState, PatientInfo, MedicalCodes
+# Add backend directory to Python path for imports when running as script
+_backend_dir = Path(__file__).parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
 
 # Load environment variables from .env file
 load_dotenv()
@@ -68,6 +74,11 @@ def _default_session_state() -> TriageAgentState:
         "handoff_ready": False,
         "chief_complaint": "",
         "assessment": "",
+        "referral_required": False,
+        "recommended_setting": "",
+        "guidance_summary": "",
+        "next_steps": [],
+        "selected_physician": None,
     }
 
 
@@ -106,11 +117,11 @@ def get_bearer_token(resource_scope: str) -> str:
             cached_token = token.token
             token_expiry = token.expires_on
             
-        logger.info(f"Acquired new bearer token, expires at: {time.ctime(token_expiry)}")
+        logger.info("Acquired new bearer token, expires at: %s", time.ctime(token_expiry))
         return cached_token
         
     except Exception as e:
-        logger.error(f"Failed to acquire bearer token: {e}")
+        logger.error("Failed to acquire bearer token: %s", e)
         raise
 
 
@@ -143,11 +154,16 @@ class ChatResponse(BaseModel):
     red_flags: list[str] = []
     handoff_ready: bool = False
     referral_complete: bool = False
+    referral_required: bool = False
     symptoms: list[str] = []
     chief_complaint: Optional[str] = None
     assessment: Optional[str] = None
     medical_codes: Optional[MedicalCodes] = None
     patient_info: Optional[PatientInfo] = None
+    recommended_setting: Optional[str] = None
+    guidance_summary: Optional[str] = None
+    next_steps: list[str] = []
+    physician: Optional[PhysicianInfo] = None
 
 
 class ClientSecret(BaseModel):
@@ -329,30 +345,52 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
         # Build response message
         current_agent = result.get("current_agent", "triage")
         
+        referral_required = result.get("referral_required", False)
         if current_agent == "triage":
-            if result.get("handoff_ready"):
-                response_text = "Thank you. I've completed the triage assessment.\n\n"
-                response_text += f"Urgency Level: {result.get('urgency_score', 0)}/5\n"
-                if result.get("red_flags"):
-                    response_text += f"⚠️ Red Flags: {', '.join(result['red_flags'])}\n"
-                response_text += "\nI'm now preparing your referral package..."
+            response_text = "I'm still gathering details to understand your symptoms fully."
+            if result.get("symptoms"):
+                response_text += f" So far you've mentioned: {', '.join(result['symptoms'])}."
+        elif current_agent == "clinical_guidance":
+            summary = result.get("guidance_summary") or "Here's what I recommend."
+            response_text = f"🩺 Clinical Guidance\n\n{summary}\n"
+            if referral_required:
+                response_text += "\nI'll coordinate a referral and share the provider details shortly."
             else:
-                response_text = "I'm gathering your information. "
-                if result.get("symptoms"):
-                    response_text += f"So far, you've mentioned: {', '.join(result['symptoms'])}. "
-                response_text += "Can you tell me more about when these symptoms started and their severity?"
-        
+                next_steps = result.get("next_steps") or []
+                if next_steps:
+                    response_text += "\nNext steps:\n" + "\n".join(f"• {step}" for step in next_steps)
+                else:
+                    response_text += "\nNo referral is required right now. Please continue monitoring your symptoms."
         elif current_agent == "referral_builder":
             referral = result.get("referral_package")
+            physician = result.get("selected_physician")
+            lines = ["✅ Referral package completed!", ""]
             if referral:
-                response_text = "✅ Referral package completed!\n\n"
-                response_text += f"Disposition: {referral.disposition}\n"
-                response_text += f"Urgency: {referral.urgency_score}/5\n"
+                lines.append(f"Disposition: {referral.disposition}")
+                lines.append(f"Urgency: {referral.urgency_score}/5")
                 if referral.red_flags:
-                    response_text += f"⚠️ Red Flags: {', '.join(referral.red_flags)}\n"
-                response_text += f"\n{referral.referral_notes}"
-            else:
-                response_text = "Building your referral package..."
+                    lines.append(f"⚠️ Red Flags: {', '.join(referral.red_flags)}")
+                lines.append("")
+                lines.append(referral.referral_notes)
+            if physician:
+                lines.append("")
+                lines.append(
+                    "Assigned Physician: "
+                    f"{physician.name} ({physician.specialty}) – {physician.location}"
+                )
+                if physician.contact_phone:
+                    lines.append(f"Phone: {physician.contact_phone}")
+                if physician.contact_email:
+                    lines.append(f"Email: {physician.contact_email}")
+            summary = result.get("guidance_summary")
+            if summary:
+                lines.append("")
+                lines.append(f"Guidance: {summary}")
+            next_steps = result.get("next_steps") or []
+            if next_steps:
+                lines.append("Suggested preparation:")
+                lines.extend(f"• {step}" for step in next_steps)
+            response_text = "\n".join(lines)
         else:
             response_text = "Processing your request..."
         
@@ -367,11 +405,16 @@ async def chat(session_id: str, chat_request: ChatRequest) -> ChatResponse:
             red_flags=result.get("red_flags", []),
             handoff_ready=result.get("handoff_ready", False),
             referral_complete=result.get("referral_package") is not None,
+            referral_required=referral_required,
             symptoms=result.get("symptoms", []),
             chief_complaint=result.get("chief_complaint"),
             assessment=result.get("assessment"),
             medical_codes=result.get("medical_codes"),
             patient_info=result.get("patient_info"),
+            recommended_setting=result.get("recommended_setting"),
+            guidance_summary=result.get("guidance_summary"),
+            next_steps=result.get("next_steps", []),
+            physician=result.get("selected_physician"),
         )
         
     except Exception as e:
@@ -405,5 +448,10 @@ async def get_session(session_id: str):
         "referral_complete": state.get("referral_package") is not None,
         "patient_info": state.get("patient_info"),
         "medical_codes": state.get("medical_codes"),
+        "referral_required": state.get("referral_required", False),
+        "recommended_setting": state.get("recommended_setting"),
+        "guidance_summary": state.get("guidance_summary"),
+        "next_steps": state.get("next_steps", []),
+        "physician": state.get("selected_physician"),
         "last_active": session_activity.get(session_id),
     }
