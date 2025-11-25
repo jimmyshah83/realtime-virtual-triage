@@ -381,7 +381,7 @@ function App() {
           item: {
             type: 'message',
             role: 'assistant',
-            content: [{ type: 'text', text: responseText }],
+            content: [{ type: 'output_text', text: responseText }],
           },
         }
         dataChannelRef.current.send(JSON.stringify(responseEvent))
