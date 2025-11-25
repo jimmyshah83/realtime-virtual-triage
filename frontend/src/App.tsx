@@ -842,174 +842,236 @@ function App() {
         ))}
       </div>
 
-      {(orchestrator.triage.urgencyScore > 0 ||
-        orchestrator.triage.redFlags.length > 0 ||
-        orchestrator.triage.symptoms.length > 0) && (
-        <div className="triage-summary">
-          <div>
-            <strong>Urgency:</strong>{' '}
-            {orchestrator.triage.urgencyScore
-              ? `${orchestrator.triage.urgencyScore}/5`
-              : 'Evaluating'}
-          </div>
-          {orchestrator.triage.redFlags.length > 0 && (
-            <div className="red-flags">
-              <strong>⚠️ Red Flags:</strong> {orchestrator.triage.redFlags.join(', ')}
-            </div>
-          )}
-          {orchestrator.triage.symptoms.length > 0 && (
-            <div>
-              <strong>Symptoms:</strong> {orchestrator.triage.symptoms.join(', ')}
-            </div>
-          )}
-          {orchestrator.triage.chiefComplaint && (
-            <div>
-              <strong>Chief Complaint:</strong> {orchestrator.triage.chiefComplaint}
-            </div>
-          )}
-          {orchestrator.triage.assessment && (
-            <div>
-              <strong>Assessment:</strong> {orchestrator.triage.assessment}
-            </div>
-          )}
-          {orchestrator.triage.medicalCodes &&
-            (orchestrator.triage.medicalCodes.snomed_codes?.length ||
-              orchestrator.triage.medicalCodes.icd_codes?.length) && (
-              <div className="medical-codes">
-                {orchestrator.triage.medicalCodes.snomed_codes?.length ? (
-                  <div>
-                    <strong>SNOMED:</strong>{' '}
-                    {orchestrator.triage.medicalCodes.snomed_codes.join(', ')}
-                  </div>
-                ) : null}
-                {orchestrator.triage.medicalCodes.icd_codes?.length ? (
-                  <div>
-                    <strong>ICD-10:</strong>{' '}
-                    {orchestrator.triage.medicalCodes.icd_codes.join(', ')}
-                  </div>
-                ) : null}
+      <div className="main-content">
+        {/* Left side - Chat Panel */}
+        <div className="chat-panel">
+          <div className="chat-messages">
+            {messages.map((message) => (
+              <div key={message.id} className={`message ${message.sender}`}>
+                <div className="message-bubble">
+                  {message.agent && (
+                    <div className="agent-badge">{getAgentLabel(message.agent)}</div>
+                  )}
+                  <p>{message.text}</p>
+                  <span className="message-time">
+                    {message.timestamp.toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {isProcessing && (
+              <div className="message bot">
+                <div className="message-bubble">
+                  <div className="agent-badge">{getAgentLabel(orchestrator.currentAgent)}</div>
+                  <p className="typing-indicator">Thinking...</p>
+                </div>
               </div>
             )}
-          {orchestrator.triage.handoffReady && !orchestrator.referral.complete && (
-            <div className="handoff-note">
-              <strong>Next:</strong> Referral coordinator is preparing your package.
-            </div>
-          )}
-          {orchestrator.referral.complete && (
-            <div className="handoff-note success">
-              <strong>Referral Ready:</strong> Package completed for provider handoff.
-            </div>
-          )}
-        </div>
-      )}
-
-      {(orchestrator.guidance.guidanceSummary || orchestrator.physician) && (
-        <div className="guidance-summary-card">
-          <div>
-            <strong>Recommended Setting:</strong>{' '}
-            {orchestrator.guidance.recommendedSetting || 'Determining'}
           </div>
-          {orchestrator.guidance.guidanceSummary && (
-            <div>
-              <strong>Guidance:</strong> {orchestrator.guidance.guidanceSummary}
+
+          <div className="chat-input-container">
+            <div className="input-wrapper">
+              <textarea
+                className="chat-input"
+                placeholder="Type your message..."
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onKeyPress={handleKeyPress}
+                rows={1}
+                disabled={isProcessing}
+              />
+              <button
+                className={`mic-button ${isRecording ? 'recording' : ''}`}
+                onClick={toggleRecording}
+                aria-label="Voice input"
+              >
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path
+                    d="M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2C10.34 2 9 3.34 9 5V11C9 12.66 10.34 14 12 14Z"
+                    fill="currentColor"
+                  />
+                  <path
+                    d="M17 11C17 13.76 14.76 16 12 16C9.24 16 7 13.76 7 11H5C5 14.53 7.61 17.43 11 17.92V21H13V17.92C16.39 17.43 19 14.53 19 11H17Z"
+                    fill="currentColor"
+                  />
+                </svg>
+              </button>
+              <button
+                className="send-button"
+                onClick={handleSendMessage}
+                disabled={!inputText.trim() || isProcessing}
+                aria-label="Send message"
+              >
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M2.01 21L23 12L2.01 3L2 10L17 12L2 14L2.01 21Z" fill="currentColor" />
+                </svg>
+              </button>
             </div>
-          )}
-          {orchestrator.guidance.nextSteps.length > 0 && (
-            <div className="next-steps">
-              <strong>Next Steps:</strong>
-              <ul>
-                {orchestrator.guidance.nextSteps.map((step, index) => (
-                  <li key={`step-${index}`}>{step}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {orchestrator.physician && (
-            <div className="physician-card">
-              <div className="physician-header">Assigned Physician</div>
-              <div className="physician-name">{orchestrator.physician.name}</div>
-              <div className="physician-detail">
-                {orchestrator.physician.specialty} • {orchestrator.physician.location}
+          </div>
+        </div>
+
+        {/* Right side - Assessment Sidebar */}
+        <div className="assessment-sidebar">
+          {/* Triage Section */}
+          <div className="sidebar-section">
+            <h3 className="sidebar-section-title">Triage Assessment</h3>
+            <div className="triage-summary">
+              <div className="triage-summary-item">
+                <strong>Urgency Level</strong>
+                <div className={`urgency-badge ${
+                  orchestrator.triage.urgencyScore >= 4 ? 'critical' :
+                  orchestrator.triage.urgencyScore >= 3 ? 'high' :
+                  orchestrator.triage.urgencyScore >= 2 ? 'medium' : 'low'
+                }`}>
+                  {orchestrator.triage.urgencyScore > 0 
+                    ? `${orchestrator.triage.urgencyScore}/5` 
+                    : 'Evaluating...'}
+                </div>
               </div>
-              {orchestrator.physician.contact_phone && (
-                <div className="physician-detail">
-                  Phone: {orchestrator.physician.contact_phone}
+
+              {orchestrator.triage.redFlags.length > 0 && (
+                <div className="triage-summary-item">
+                  <strong>⚠️ Red Flags</strong>
+                  <div className="red-flags-list">
+                    {orchestrator.triage.redFlags.join(', ')}
+                  </div>
                 </div>
               )}
-              {orchestrator.physician.contact_email && (
-                <div className="physician-detail">
-                  Email: {orchestrator.physician.contact_email}
+
+              {orchestrator.triage.symptoms.length > 0 && (
+                <div className="triage-summary-item">
+                  <strong>Symptoms</strong>
+                  <div className="symptoms-list">
+                    {orchestrator.triage.symptoms.map((symptom, i) => (
+                      <span key={i} className="symptom-tag">{symptom}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {orchestrator.triage.chiefComplaint && (
+                <div className="triage-summary-item">
+                  <strong>Chief Complaint</strong>
+                  <div>{orchestrator.triage.chiefComplaint}</div>
+                </div>
+              )}
+
+              {orchestrator.triage.assessment && (
+                <div className="triage-summary-item">
+                  <strong>Assessment</strong>
+                  <div>{orchestrator.triage.assessment}</div>
+                </div>
+              )}
+
+              {orchestrator.triage.medicalCodes &&
+                (orchestrator.triage.medicalCodes.snomed_codes?.length ||
+                  orchestrator.triage.medicalCodes.icd_codes?.length) && (
+                  <div className="triage-summary-item">
+                    <strong>Medical Codes</strong>
+                    <div className="medical-codes">
+                      {orchestrator.triage.medicalCodes.snomed_codes?.length ? (
+                        <div>SNOMED: {orchestrator.triage.medicalCodes.snomed_codes.join(', ')}</div>
+                      ) : null}
+                      {orchestrator.triage.medicalCodes.icd_codes?.length ? (
+                        <div>ICD-10: {orchestrator.triage.medicalCodes.icd_codes.join(', ')}</div>
+                      ) : null}
+                    </div>
+                  </div>
+                )}
+
+              {orchestrator.triage.handoffReady && !orchestrator.referral.complete && (
+                <div className="handoff-note">
+                  <strong>Next:</strong> Referral coordinator is preparing your package.
+                </div>
+              )}
+
+              {orchestrator.referral.complete && (
+                <div className="handoff-note success">
+                  <strong>Referral Ready:</strong> Package completed for provider handoff.
+                </div>
+              )}
+
+              {!orchestrator.triage.urgencyScore && 
+               !orchestrator.triage.symptoms.length && 
+               !orchestrator.triage.chiefComplaint && (
+                <div className="empty-state">
+                  Waiting for conversation to begin...
                 </div>
               )}
             </div>
-          )}
-        </div>
-      )}
+          </div>
 
-      <div className="chat-messages">
-        {messages.map((message) => (
-          <div key={message.id} className={`message ${message.sender}`}>
-            <div className="message-bubble">
-              {message.agent && (
-                <div className="agent-badge">{getAgentLabel(message.agent)}</div>
+          {/* Clinical Guidance Section */}
+          <div className="sidebar-section">
+            <h3 className="sidebar-section-title">Clinical Guidance</h3>
+            <div className="guidance-summary">
+              {orchestrator.guidance.recommendedSetting ? (
+                <>
+                  <div className="triage-summary-item">
+                    <strong>Recommended Setting</strong>
+                    <span className="setting-badge">
+                      {orchestrator.guidance.recommendedSetting}
+                    </span>
+                  </div>
+
+                  {orchestrator.guidance.guidanceSummary && (
+                    <div className="triage-summary-item">
+                      <strong>Guidance</strong>
+                      <div>{orchestrator.guidance.guidanceSummary}</div>
+                    </div>
+                  )}
+
+                  {orchestrator.guidance.nextSteps.length > 0 && (
+                    <div className="triage-summary-item">
+                      <strong>Next Steps</strong>
+                      <ul className="next-steps-list">
+                        {orchestrator.guidance.nextSteps.map((step, index) => (
+                          <li key={`step-${index}`}>{step}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="empty-state">
+                  Waiting for triage completion...
+                </div>
               )}
-              <p>{message.text}</p>
-              <span className="message-time">
-                {message.timestamp.toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </span>
             </div>
           </div>
-        ))}
-        {isProcessing && (
-          <div className="message bot">
-            <div className="message-bubble">
-              <div className="agent-badge">{getAgentLabel(orchestrator.currentAgent)}</div>
-              <p className="typing-indicator">Thinking...</p>
-            </div>
-          </div>
-        )}
-      </div>
 
-      <div className="chat-input-container">
-        <div className="input-wrapper">
-          <textarea
-            className="chat-input"
-            placeholder="Type your message..."
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            onKeyPress={handleKeyPress}
-            rows={1}
-            disabled={isProcessing}
-          />
-          <button
-            className={`mic-button ${isRecording ? 'recording' : ''}`}
-            onClick={toggleRecording}
-            aria-label="Voice input"
-          >
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path
-                d="M12 14C13.66 14 15 12.66 15 11V5C15 3.34 13.66 2 12 2C10.34 2 9 3.34 9 5V11C9 12.66 10.34 14 12 14Z"
-                fill="currentColor"
-              />
-              <path
-                d="M17 11C17 13.76 14.76 16 12 16C9.24 16 7 13.76 7 11H5C5 14.53 7.61 17.43 11 17.92V21H13V17.92C16.39 17.43 19 14.53 19 11H17Z"
-                fill="currentColor"
-              />
-            </svg>
-          </button>
-          <button
-            className="send-button"
-            onClick={handleSendMessage}
-            disabled={!inputText.trim() || isProcessing}
-            aria-label="Send message"
-          >
-            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M2.01 21L23 12L2.01 3L2 10L17 12L2 14L2.01 21Z" fill="currentColor" />
-            </svg>
-          </button>
+          {/* Physician Section */}
+          <div className="sidebar-section">
+            <h3 className="sidebar-section-title">Assigned Provider</h3>
+            {orchestrator.physician ? (
+              <div className="physician-card">
+                <div className="physician-header">Matched Physician</div>
+                <div className="physician-name">{orchestrator.physician.name}</div>
+                <div className="physician-detail">
+                  {orchestrator.physician.specialty} • {orchestrator.physician.location}
+                </div>
+                {orchestrator.physician.contact_phone && (
+                  <div className="physician-detail">
+                    📞 {orchestrator.physician.contact_phone}
+                  </div>
+                )}
+                {orchestrator.physician.contact_email && (
+                  <div className="physician-detail">
+                    ✉️ {orchestrator.physician.contact_email}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="empty-state">
+                {orchestrator.guidance.referralRequired 
+                  ? 'Matching physician...' 
+                  : 'No referral required'}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
